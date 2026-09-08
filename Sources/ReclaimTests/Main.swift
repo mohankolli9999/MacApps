@@ -33,6 +33,7 @@ import ReclaimCore
     runCatalogueTests(t)
     runClassifierTests(t)
     runValidatorTests(t)
+    runManifestTests(t)
     await runAsyncValidatorTests(t)
 
     return t.report()
