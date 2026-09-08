@@ -34,4 +34,12 @@ public struct Recipe: Codable, Sendable, Equatable {
         self.parameters = parameters
         self.cost = cost
     }
+
+    /// A recipe is only proof if it names what to restore. `ollama pull <model>`
+    /// restores nothing — the identifier died with the bytes. Unresolved
+    /// `<placeholders>` therefore disqualify a recipe from being treated as proof.
+    public var isConcrete: Bool {
+        guard let open = command.firstIndex(of: "<") else { return true }
+        return command[open...].firstIndex(of: ">") == nil
+    }
 }

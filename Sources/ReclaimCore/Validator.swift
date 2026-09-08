@@ -14,9 +14,9 @@ public protocol RecipeValidator: Sendable {
 public func applyValidation(_ artefact: Artefact, _ result: ValidationResult) -> Artefact {
     var out = artefact
     switch result {
-    case .proven(let recipe):
+    case .proven(let recipe) where recipe.isConcrete:
         out.recipe = recipe
-    case .unproven:
+    case .proven, .unproven:
         out.recipe = nil
         out.tier = .irreplaceable
     }

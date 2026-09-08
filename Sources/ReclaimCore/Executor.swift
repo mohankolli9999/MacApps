@@ -38,6 +38,9 @@ public struct ReclaimExecutor: Sendable {
         guard let recipe = artefact.recipe else {
             return .skipped(reason: "no validated restore recipe")
         }
+        guard recipe.isConcrete else {
+            return .skipped(reason: "restore recipe is a template, not a command: \(recipe.command)")
+        }
         guard mode == .reclaim else {
             return .wouldReclaim(artefact.physicalBytes)
         }
