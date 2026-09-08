@@ -1,7 +1,7 @@
 import Foundation
 import ReclaimCore
 
-@MainActor func runAll() -> Int32 {
+@MainActor func runAll() async -> Int32 {
     let t = Harness()
 
     t.section("Tier ordering")
@@ -32,8 +32,15 @@ import ReclaimCore
     runScannerTests(t)
     runCatalogueTests(t)
     runClassifierTests(t)
+    runValidatorTests(t)
+    await runAsyncValidatorTests(t)
 
     return t.report()
 }
 
-exit(MainActor.assumeIsolated { runAll() })
+@main
+struct TestRunner {
+    static func main() async {
+        exit(await runAll())
+    }
+}
