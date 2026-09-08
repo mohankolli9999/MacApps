@@ -31,6 +31,7 @@ import ReclaimCore
 
     runScannerTests(t)
     runCatalogueTests(t)
+    runClassifierTests(t)
 
     return t.report()
 }
