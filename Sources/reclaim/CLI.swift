@@ -44,8 +44,7 @@ func validate(_ artefacts: [Artefact], _ catalogue: Catalogue) async -> [Artefac
     var out: [Artefact] = []
     for a in artefacts {
         guard let entry = catalogue.entry(id: a.id) else { out.append(a); continue }
-        guard let validator = ValidationRegistry.validator(named: entry.validator,
-                                                           recipeKind: entry.recipeKind) else {
+        guard let validator = ValidationRegistry.validator(for: entry) else {
             out.append(applyValidation(a, .unproven(reason: "unknown validator '\(entry.validator)'")))
             continue
         }

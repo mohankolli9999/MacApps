@@ -20,6 +20,9 @@ public struct Recipe: Codable, Sendable, Equatable {
         case homebrewFetch
         case pipDownload
         case rebuild
+        /// Nothing to run: the tool refetches this on next use. The strongest
+        /// recipe there is, and the honest one for pure download caches.
+        case automatic
     }
 
     public var kind: Kind

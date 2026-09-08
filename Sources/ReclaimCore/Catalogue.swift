@@ -7,6 +7,20 @@ public struct CatalogueEntry: Codable, Sendable, Equatable {
     public var tier: Tier
     public var recipeKind: Recipe.Kind?
     public var validator: String
+    /// The restore instruction, for validators that cannot derive one by
+    /// inspecting the disk. Kept as catalogue data so wording ships without a release.
+    public var restoreNote: String?
+
+    public init(id: String, displayName: String, path: String, tier: Tier,
+                recipeKind: Recipe.Kind? = nil, validator: String, restoreNote: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.path = path
+        self.tier = tier
+        self.recipeKind = recipeKind
+        self.validator = validator
+        self.restoreNote = restoreNote
+    }
 
     /// `path` with a leading tilde resolved against the current home directory.
     public var expandedPath: String {

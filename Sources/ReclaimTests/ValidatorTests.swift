@@ -28,13 +28,23 @@ import ReclaimCore
             "costly artefact downgrades on failure too")
 
     t.section("Validator registry")
-    let always = ValidationRegistry.validator(named: "alwaysProven", recipeKind: .npmCleanInstall)
-    let never = ValidationRegistry.validator(named: "none", recipeKind: nil)
-    t.expect(always != nil, "alwaysProven validator resolves")
-    t.expect(never != nil, "none validator resolves")
+    func entry(_ validator: String, kind: Recipe.Kind? = nil, note: String? = nil) -> CatalogueEntry {
+        CatalogueEntry(id: "x", displayName: "x", path: "/x", tier: .exact,
+                       recipeKind: kind, validator: validator, restoreNote: note)
+    }
+    t.expect(ValidationRegistry.validator(for: entry("alwaysProven", kind: .npmCleanInstall)) != nil,
+             "alwaysProven validator resolves")
+    t.expect(ValidationRegistry.validator(for: entry("none")) != nil, "none validator resolves")
+    t.expect(ValidationRegistry.validator(for: entry("ollama")) != nil, "ollama validator resolves")
+    t.expect(ValidationRegistry.validator(for: entry("automatic", note: "Nothing to run.")) != nil,
+             "automatic validator resolves when the catalogue supplies a note")
+
+    // Without a note there is no instruction to give, so it must not resolve.
+    t.expect(ValidationRegistry.validator(for: entry("automatic")) == nil,
+             "automatic validator without a note resolves to nil")
 
     // An unrecognised validator name must not silently pass.
-    t.expect(ValidationRegistry.validator(named: "bogus", recipeKind: nil) == nil,
+    t.expect(ValidationRegistry.validator(for: entry("bogus")) == nil,
              "unknown validator name resolves to nil, not a permissive default")
 }
 

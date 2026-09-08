@@ -37,6 +37,8 @@ import ReclaimCore
     runExecutorTests(t)
     runRestoreTests(t)
     runRegressionTests(t)
+    runTreemapTests(t)
+    runOllamaTests(t)
     await runAsyncValidatorTests(t)
 
     return t.report()
