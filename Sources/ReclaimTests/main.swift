@@ -29,6 +29,8 @@ import ReclaimCore
     t.equal(a.tier, .exact, "artefact carries tier")
     t.expect(a.recipe != nil, "artefact carries recipe")
 
+    runScannerTests(t)
+
     return t.report()
 }
 
