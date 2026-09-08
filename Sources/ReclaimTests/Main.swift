@@ -34,6 +34,7 @@ import ReclaimCore
     runClassifierTests(t)
     runValidatorTests(t)
     runManifestTests(t)
+    runExecutorTests(t)
     await runAsyncValidatorTests(t)
 
     return t.report()
