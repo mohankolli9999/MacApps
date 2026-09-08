@@ -30,6 +30,7 @@ import ReclaimCore
     t.expect(a.recipe != nil, "artefact carries recipe")
 
     runScannerTests(t)
+    runCatalogueTests(t)
 
     return t.report()
 }
