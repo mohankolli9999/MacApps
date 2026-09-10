@@ -1,18 +1,7 @@
 import Foundation
 import ReclaimCore
 
-func humanBytes(_ b: Int64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"]
-    var value = Double(b)
-    var i = 0
-    while value >= 1024 && i < units.count - 1 { value /= 1024; i += 1 }
-    return String(format: "%.1f %@", value, units[i])
-}
-
-func manifestURL() -> URL {
-    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    return base.appendingPathComponent("DiskReclaim/manifest.jsonl")
-}
+func humanBytes(_ b: Int64) -> String { ByteFormat.decimal.string(b) }
 
 func loadCatalogue(overridePath: String?) -> Catalogue {
     if let overridePath, let data = FileManager.default.contents(atPath: overridePath),
@@ -37,7 +26,7 @@ func survey(_ catalogue: Catalogue, only paths: [String]) -> [Artefact] {
         guard let m = try? DiskScanner.measure(url) else { continue }
         out.append(classifier.classify(path: url, measurement: m))
     }
-    return out.sorted { $0.physicalBytes > $1.physicalBytes }
+    return out.sorted { $0.reclaimableBytes > $1.reclaimableBytes }
 }
 
 func validate(_ artefacts: [Artefact], _ catalogue: Catalogue) async -> [Artefact] {
@@ -58,13 +47,13 @@ func printTable(_ artefacts: [Artefact]) {
     for a in artefacts {
         let actionable = a.tier <= Tier.automaticCeiling && a.recipe != nil
         let mark = actionable ? "*" : " "
-        print("\(mark) \(humanBytes(a.physicalBytes).padded(to: 10))  \(a.tier.rawValue.padded(to: 14)) \(a.path.path)")
+        print("\(mark) \(humanBytes(a.reclaimableBytes).padded(to: 10))  \(a.tier.rawValue.padded(to: 14)) \(a.path.path)")
         if let r = a.recipe {
             print("               restore: \(r.command)")
         }
     }
     let total = artefacts.filter { $0.tier <= Tier.automaticCeiling && $0.recipe != nil }
-        .reduce(Int64(0)) { $0 + $1.physicalBytes }
+        .reduce(Int64(0)) { $0 + $1.reclaimableBytes }
     print("\nreclaimable: \(humanBytes(total))")
 }
 
@@ -84,7 +73,7 @@ struct CLI {
         let paths = Array(args.dropFirst())
 
         let catalogue = loadCatalogue(overridePath: ProcessInfo.processInfo.environment["RECLAIM_CATALOGUE"])
-        let store = ManifestStore(url: manifestURL())
+        let store = ManifestStore.standard
 
         switch command {
         case "scan":
@@ -121,12 +110,14 @@ struct CLI {
             print("\ntotal: \(humanBytes(freed))")
 
         case "restore":
-            guard let plans = try? RestoreEngine(manifest: store).planAll() else {
+            guard let plans = try? RestoreEngine(manifest: store).history() else {
                 print("no manifest yet"); return
             }
             if plans.isEmpty { print("nothing has been reclaimed") }
             for p in plans {
-                print("\(p.entry.path)\n  \(p.command)  [\(humanBytes(p.entry.bytesFreed))]")
+                let state = p.isRestored ? "  (restored)" : ""
+                let proof = p.entry.recipe.isConcrete ? "" : "  [template - will not restore]"
+                print("\(p.entry.path)\(state)\n  \(p.command)  [\(humanBytes(p.entry.bytesFreed))]\(proof)")
             }
 
         default:

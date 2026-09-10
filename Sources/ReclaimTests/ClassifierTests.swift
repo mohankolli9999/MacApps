@@ -15,7 +15,7 @@ import ReclaimCore
     """.data(using: .utf8)!
     let cat = try! Catalogue.load(from: json)
     let c = Classifier(catalogue: cat)
-    let m = DiskScanner.Measurement(logicalBytes: 500, physicalBytes: 512, fileCount: 3)
+    let m = DiskScanner.Measurement(logicalBytes: 500, reclaimableBytes: 512, fileCount: 3)
 
     let known = c.classify(path: URL(fileURLWithPath: "/fixture/.npm/_cacache"), measurement: m)
     t.equal(known.id, "npm.cache", "known path maps to catalogue id")
@@ -34,4 +34,12 @@ import ReclaimCore
     // A path that merely shares a prefix string must not match.
     let impostor = c.classify(path: URL(fileURLWithPath: "/fixture/.npm/_cacache-backup"), measurement: m)
     t.equal(impostor.tier, .unknown, "sibling with shared prefix does not match")
+
+    // A measurement carries two very different sizes and the artefact takes one
+    // of them. The reclaim button and the manifest both quote whichever it took,
+    // so a cache holding cloned blocks — claiming 4096, returning 1024 — is the
+    // fixture that catches the wrong one being wired through.
+    let shared = DiskScanner.Measurement(logicalBytes: 4096, reclaimableBytes: 1024, fileCount: 1)
+    let cloned = c.classify(path: URL(fileURLWithPath: "/fixture/.npm/_cacache"), measurement: shared)
+    t.equal(cloned.reclaimableBytes, 1024, "artefact carries what deleting frees, not what it claims")
 }

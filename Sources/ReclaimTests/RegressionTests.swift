@@ -31,7 +31,7 @@ import ReclaimCore
     t.section("Regression: placeholder recipes are not proof")
 
     let artefact = Artefact(id: "ollama.models", path: URL(fileURLWithPath: "/fixture/models"),
-                            logicalBytes: 1, physicalBytes: 1, tier: .exact)
+                            logicalBytes: 1, reclaimableBytes: 1, tier: .exact)
 
     // The incident deleted 15GB of Ollama models recording only
     // "ollama pull <model>" — a command that restores nothing.
@@ -62,7 +62,7 @@ import ReclaimCore
 
     let store = ManifestStore(url: dir.appendingPathComponent("m.jsonl"))
     let withPlaceholder = Artefact(id: "ollama.models", path: victim,
-                                   logicalBytes: 512, physicalBytes: 4096,
+                                   logicalBytes: 512, reclaimableBytes: 4096,
                                    tier: .exact, recipe: placeholder)
     let out = (try? ReclaimExecutor(manifest: store, mode: .reclaim).execute([withPlaceholder])) ?? []
     if case .skipped = out.first?.1 {

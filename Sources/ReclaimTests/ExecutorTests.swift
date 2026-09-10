@@ -22,7 +22,7 @@ import ReclaimCore
     let v1 = makeVictim("dryrun")
     let dryStore = ManifestStore(url: dir.appendingPathComponent("dry.jsonl"))
     let dry = ReclaimExecutor(manifest: dryStore, mode: .dryRun)
-    let a1 = Artefact(id: "npm.cache", path: v1, logicalBytes: 1024, physicalBytes: 4096,
+    let a1 = Artefact(id: "npm.cache", path: v1, logicalBytes: 1024, reclaimableBytes: 4096,
                       tier: .exact, recipe: recipe)
     let dryResults = (try? dry.execute([a1])) ?? []
     t.equal(dryResults.count, 1, "dry run reports one result")
@@ -38,7 +38,7 @@ import ReclaimCore
     let v2 = makeVictim("live")
     let liveStore = ManifestStore(url: dir.appendingPathComponent("live.jsonl"))
     let live = ReclaimExecutor(manifest: liveStore, mode: .reclaim)
-    let a2 = Artefact(id: "npm.cache", path: v2, logicalBytes: 1024, physicalBytes: 4096,
+    let a2 = Artefact(id: "npm.cache", path: v2, logicalBytes: 1024, reclaimableBytes: 4096,
                       tier: .exact, recipe: recipe)
     let liveResults = (try? live.execute([a2])) ?? []
     if case .reclaimed(let bytes) = liveResults.first?.1 {
@@ -50,9 +50,25 @@ import ReclaimCore
     t.equal((try? liveStore.all().count) ?? -1, 1, "reclaim records one manifest entry")
     t.equal((try? liveStore.all())?.first?.recipe.command, "npm ci", "manifest stores the restore command")
 
+    // The manifest is what the History tab adds up, so it has to record what the
+    // volume actually got back rather than what the folder occupied.
+    let vShared = makeVictim("shared")
+    let sharedStore = ManifestStore(url: dir.appendingPathComponent("shared.jsonl"))
+    let shared = ReclaimExecutor(manifest: sharedStore, mode: .reclaim)
+    let a4 = Artefact(id: "npm.cache", path: vShared, logicalBytes: 4096,
+                      reclaimableBytes: 1024, tier: .exact, recipe: recipe)
+    let sharedResults = (try? shared.execute([a4])) ?? []
+    if case .reclaimed(let bytes) = sharedResults.first?.1 {
+        t.equal(bytes, 1024, "reclaim promises what deleting frees")
+    } else {
+        t.expect(false, "reclaim yields reclaimed")
+    }
+    t.equal((try? sharedStore.all())?.first?.bytesFreed, 1024,
+            "and the manifest records the same figure")
+
     // The guarantee: no recipe means no deletion, whatever the tier claims.
     let v3 = makeVictim("norecipe")
-    let g1 = Artefact(id: "npm.cache", path: v3, logicalBytes: 1024, physicalBytes: 4096,
+    let g1 = Artefact(id: "npm.cache", path: v3, logicalBytes: 1024, reclaimableBytes: 4096,
                       tier: .exact, recipe: nil)
     let r3 = (try? live.execute([g1])) ?? []
     if case .skipped(let reason) = r3.first?.1 {
@@ -64,7 +80,7 @@ import ReclaimCore
 
     // Irreplaceable is never actioned, even holding a recipe.
     let v4 = makeVictim("irreplaceable")
-    let g2 = Artefact(id: "docker.volumes", path: v4, logicalBytes: 1024, physicalBytes: 4096,
+    let g2 = Artefact(id: "docker.volumes", path: v4, logicalBytes: 1024, reclaimableBytes: 4096,
                       tier: .irreplaceable, recipe: recipe)
     let r4 = (try? live.execute([g2])) ?? []
     if case .skipped = r4.first?.1 {
@@ -74,9 +90,24 @@ import ReclaimCore
     }
     t.expect(fm.fileExists(atPath: v4.path), "irreplaceable artefact survives")
 
+    // The ordering guarantee. If the restore record cannot be written, the bytes
+    // must still be on disk: deleting first and recording second turns a failed
+    // write into the one loss this product exists to prevent.
+    let blocked = dir.appendingPathComponent("blocked")
+    try? Data("this is a file, not a directory".utf8).write(to: blocked)
+    let v6 = makeVictim("unrecorded")
+    let brokenStore = ManifestStore(url: blocked.appendingPathComponent("manifest.jsonl"))
+    let broken = ReclaimExecutor(manifest: brokenStore, mode: .reclaim)
+    let a6 = Artefact(id: "npm.cache", path: v6, logicalBytes: 1024, reclaimableBytes: 4096,
+                      tier: .exact, recipe: recipe)
+    var recordFailed = false
+    do { _ = try broken.execute([a6]) } catch { recordFailed = true }
+    t.expect(recordFailed, "an unwritable manifest surfaces as an error")
+    t.expect(fm.fileExists(atPath: v6.path), "an unwritable manifest leaves the bytes on disk")
+
     // Unknown is never actioned.
     let v5 = makeVictim("unknown")
-    let g3 = Artefact(id: "unknown", path: v5, logicalBytes: 1024, physicalBytes: 4096,
+    let g3 = Artefact(id: "unknown", path: v5, logicalBytes: 1024, reclaimableBytes: 4096,
                       tier: .unknown, recipe: nil)
     _ = try? live.execute([g3])
     t.expect(fm.fileExists(atPath: v5.path), "unknown artefact survives")

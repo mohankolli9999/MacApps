@@ -42,16 +42,18 @@ public struct ReclaimExecutor: Sendable {
             return .skipped(reason: "restore recipe is a template, not a command: \(recipe.command)")
         }
         guard mode == .reclaim else {
-            return .wouldReclaim(artefact.physicalBytes)
+            return .wouldReclaim(artefact.reclaimableBytes)
         }
 
-        try FileManager.default.removeItem(at: artefact.path)
-
+        // Record first, delete second. The reverse order turns a failed write
+        // into bytes gone with no way back; this order can only ever leave an
+        // entry describing something still on disk, which the next scan fixes.
         try manifest.append(ManifestEntry(artefactID: artefact.id,
                                           path: artefact.path.path,
                                           tier: artefact.tier,
-                                          bytesFreed: artefact.physicalBytes,
+                                          bytesFreed: artefact.reclaimableBytes,
                                           recipe: recipe))
-        return .reclaimed(artefact.physicalBytes)
+        try FileManager.default.removeItem(at: artefact.path)
+        return .reclaimed(artefact.reclaimableBytes)
     }
 }

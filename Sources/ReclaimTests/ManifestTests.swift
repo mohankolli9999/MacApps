@@ -44,4 +44,6 @@ import ReclaimCore
     try? handle?.write(contentsOf: Data("{not json\n".utf8))
     try? handle?.close()
     t.equal((try? reopened.all().count) ?? -1, 2, "corrupt line is skipped, valid entries survive")
+    // Skipping silently would lose a restore record without telling anyone.
+    t.equal((try? reopened.read().unreadableLines) ?? -1, 1, "a skipped line is counted, not hidden")
 }

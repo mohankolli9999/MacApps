@@ -38,10 +38,16 @@ public struct TreemapRect: Sendable, Equatable {
 /// dominates, and a 600x3 sliver is neither readable nor clickable. Squarifying
 /// keeps aspect ratios near 1 so every block stays a usable target.
 public enum Treemap {
-    public static func layout(_ nodes: [TreemapNode], in box: TreemapBox) -> [TreemapRect] {
+    /// Pass `presorted` when the caller has already chosen an order and needs it
+    /// kept. An animating treemap needs this: ordering by the value currently
+    /// being tweened makes blocks trade places mid-flight, so callers order by
+    /// the settled size once and animate within that fixed arrangement.
+    public static func layout(_ nodes: [TreemapNode],
+                              in box: TreemapBox,
+                              presorted: Bool = false) -> [TreemapRect] {
         guard !nodes.isEmpty else { return [] }
 
-        let ordered = nodes.sorted {
+        let ordered = presorted ? nodes : nodes.sorted {
             $0.value == $1.value ? $0.id < $1.id : $0.value > $1.value
         }
         let zeroRect = { (n: TreemapNode) in

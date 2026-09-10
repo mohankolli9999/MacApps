@@ -19,11 +19,28 @@ import ReclaimCore
     t.equal(r.kind, .ollamaPull, "recipe kind round-trips")
     t.equal(r.parameters["digest"], "sha256:abc", "recipe parameters retained")
 
+    // isConcrete only rules out unresolved placeholders. Prose passes it, and
+    // prose on a clipboard is useless, so the two questions are not the same.
+    t.expect(Recipe(kind: .npmCleanInstall, command: "npm ci").isRunnableCommand,
+             "a resolved command is runnable")
+    t.expect(!Recipe(kind: .ollamaPull, command: "ollama pull <model>").isRunnableCommand,
+             "a template is not runnable")
+    t.expect(!Recipe(kind: .rebuild, command: "rebuild the project").isRunnableCommand,
+             "prose describing a rebuild is not a command to run")
+    t.expect(!Recipe(kind: .automatic, command: "the tool refetches this on next use").isRunnableCommand,
+             "an automatic refetch has nothing to run")
+
+    // A trashed file has a real way back, so it counts as recorded — but Put Back
+    // is a gesture in Finder, not a command anyone can paste into a shell.
+    let trashed = Recipe(kind: .trash, command: "In Finder, open the Trash and choose Put Back")
+    t.expect(trashed.isConcrete, "a trashed file did record a way back")
+    t.expect(!trashed.isRunnableCommand, "Put Back is a gesture, not a command to run")
+
     t.section("Artefact")
     let a = Artefact(id: "ollama.models",
                      path: URL(fileURLWithPath: "/tmp/x"),
                      logicalBytes: 100,
-                     physicalBytes: 90,
+                     reclaimableBytes: 90,
                      tier: .exact,
                      recipe: r)
     t.equal(a.tier, .exact, "artefact carries tier")
@@ -39,7 +56,23 @@ import ReclaimCore
     runRegressionTests(t)
     runTreemapTests(t)
     runOllamaTests(t)
+    runStreamingScanTests(t)
+    runVolumeScanTests(t)
+    runStorageSafetyTests(t)
+    runFileSpaceTests(t)
+    runSelectionSpaceTests(t)
+    runVolumeLedgerTests(t)
+    runByteFormatTests(t)
+    runAccessProbeTests(t)
+    runLicenseTests(t)
+    runEntitlementTests(t)
     await runAsyncValidatorTests(t)
+    await runConcurrentScanTests(t)
+    await runOffVolumeTests(t)
+    runFirmlinkTests(t)
+    runSymlinkCrossingTests(t)
+    runNoCloneSupportTests(t)
+    await runCloudPlaceholderTests(t)
 
     return t.report()
 }

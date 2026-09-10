@@ -6,7 +6,7 @@ import ReclaimCore
 
     let artefact = Artefact(id: "ollama.models",
                             path: URL(fileURLWithPath: "/fixture/models"),
-                            logicalBytes: 1000, physicalBytes: 1024, tier: .exact)
+                            logicalBytes: 1000, reclaimableBytes: 1024, tier: .exact)
 
     let proven = ValidationResult.proven(
         Recipe(kind: .ollamaPull, command: "ollama pull llama3:8b"))
@@ -23,7 +23,7 @@ import ReclaimCore
 
     // A costly artefact that fails validation also downgrades — no exceptions.
     let costly = Artefact(id: "xcode.deriveddata", path: URL(fileURLWithPath: "/fixture/dd"),
-                          logicalBytes: 1, physicalBytes: 1, tier: .costly)
+                          logicalBytes: 1, reclaimableBytes: 1, tier: .costly)
     t.equal(applyValidation(costly, failed).tier, .irreplaceable,
             "costly artefact downgrades on failure too")
 
@@ -52,7 +52,7 @@ func runAsyncValidatorTests(_ t: Harness) async {
     await t.section("Validator behaviour")
 
     let artefact = Artefact(id: "npm.cache", path: URL(fileURLWithPath: "/fixture/npm"),
-                            logicalBytes: 1, physicalBytes: 1, tier: .exact)
+                            logicalBytes: 1, reclaimableBytes: 1, tier: .exact)
 
     let always = AlwaysProvenValidator(recipe: Recipe(kind: .npmCleanInstall, command: "npm ci"))
     if case .proven = await always.validate(artefact) {

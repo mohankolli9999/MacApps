@@ -91,4 +91,14 @@ private func approx(_ a: Double, _ b: Double, _ tol: Double = 0.0001) -> Bool {
     // while the scan is still revising sizes.
     let again = Treemap.layout(nodes, in: box)
     t.expect(again.map(\.id) == rects.map(\.id), "layout is deterministic")
+
+    // An animating treemap tweens values every frame. If layout re-sorted by the
+    // in-flight value, blocks would swap places mid-animation.
+    let pinned = nodes.sorted { $0.value > $1.value }
+    let midFlight = pinned.map { TreemapNode(id: $0.id, value: $0.value * ($0.id == "npm" ? 4 : 1)) }
+    let held = Treemap.layout(midFlight, in: box, presorted: true)
+    t.expect(held.map(\.id) == pinned.map(\.id),
+             "presorted layout keeps the caller's order even when values overtake")
+    let holdArea = held.reduce(0.0) { $0 + $1.width * $1.height }
+    t.expect(approx(holdArea, boxArea, 0.5), "presorted layout still tiles the box exactly")
 }

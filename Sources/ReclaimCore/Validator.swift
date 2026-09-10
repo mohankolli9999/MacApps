@@ -131,6 +131,7 @@ public enum ValidationRegistry {
         case .pipDownload: "pip download <package>"
         case .rebuild: "rebuild the project"
         case .automatic: "No action needed."
+        case .trash: "In Finder, open the Trash and choose Put Back"
         }
     }
 }

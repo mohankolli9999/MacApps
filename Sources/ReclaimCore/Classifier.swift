@@ -21,14 +21,14 @@ public struct Classifier: Sendable {
             return Artefact(id: "unknown",
                             path: path,
                             logicalBytes: measurement.logicalBytes,
-                            physicalBytes: measurement.physicalBytes,
+                            reclaimableBytes: measurement.reclaimableBytes,
                             tier: .unknown)
         }
 
         return Artefact(id: entry.id,
                         path: path,
                         logicalBytes: measurement.logicalBytes,
-                        physicalBytes: measurement.physicalBytes,
+                        reclaimableBytes: measurement.reclaimableBytes,
                         tier: entry.tier)
     }
 }

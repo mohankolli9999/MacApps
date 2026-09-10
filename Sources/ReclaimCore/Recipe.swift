@@ -23,6 +23,10 @@ public struct Recipe: Codable, Sendable, Equatable {
         /// Nothing to run: the tool refetches this on next use. The strongest
         /// recipe there is, and the honest one for pure download caches.
         case automatic
+        /// Removed from the storage map rather than the catalogue, so there is no
+        /// recipe to record. The Trash is the way back instead — weaker than a
+        /// command, but real, and the reason arbitrary files are never unlinked.
+        case trash
     }
 
     public var kind: Kind
@@ -44,5 +48,12 @@ public struct Recipe: Codable, Sendable, Equatable {
     public var isConcrete: Bool {
         guard let open = command.firstIndex(of: "<") else { return true }
         return command[open...].firstIndex(of: ">") == nil
+    }
+
+    /// Whether there is a literal command to run. `.rebuild` and `.automatic`
+    /// carry prose, which is a true answer to "how does this come back" and a
+    /// useless thing to put on a clipboard.
+    public var isRunnableCommand: Bool {
+        ![.rebuild, .automatic, .trash].contains(kind) && isConcrete
     }
 }

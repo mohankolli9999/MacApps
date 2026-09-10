@@ -26,7 +26,33 @@ import ReclaimCore
     let none = try? engine.plan(for: "/never/reclaimed")
     t.expect((none ?? nil) == nil, "no plan for a path never reclaimed")
 
-    t.equal((try? engine.planAll().count) ?? -1, 1, "planAll returns every recorded reclaim")
+    t.equal((try? engine.history().count) ?? -1, 1, "history returns every recorded reclaim")
+
+    t.section("Restore history")
+    let hStore = ManifestStore(url: dir.appendingPathComponent("history.jsonl"))
+    let npm = Recipe(kind: .npmCleanInstall, command: "npm ci")
+    let older = ManifestEntry(artefactID: "npm.cache", path: "/fixture/npm", tier: .exact,
+                              bytesFreed: 100, recipe: npm,
+                              timestamp: Date(timeIntervalSince1970: 1000))
+    let newer = ManifestEntry(artefactID: "npm.cache", path: "/fixture/npm", tier: .exact,
+                              bytesFreed: 200, recipe: npm,
+                              timestamp: Date(timeIntervalSince1970: 2000))
+    try? hStore.append(older)
+    try? hStore.append(newer)
+
+    let hEngine = RestoreEngine(manifest: hStore)
+    let history = (try? hEngine.history()) ?? []
+    t.equal(history.count, 2, "history lists every reclaim")
+    t.equal(history.first?.entry.bytesFreed, 200, "history is newest first")
+    t.expect(history.allSatisfy { !$0.isRestored }, "a fresh reclaim does not read as restored")
+
+    try? hEngine.markRestored(older)
+    let after = (try? hEngine.history()) ?? []
+    t.equal(after.count, 2, "marking restored folds into the reclaim, it does not add a row")
+    t.equal(after.first { $0.entry.bytesFreed == 100 }?.isRestored, true,
+            "the marked reclaim reads as restored")
+    t.equal(after.first { $0.entry.bytesFreed == 200 }?.isRestored, false,
+            "a later reclaim of the same path is untouched")
 
     t.section("Round trip")
     // Full cycle: create -> classify -> validate -> reclaim -> restore command recovered.
