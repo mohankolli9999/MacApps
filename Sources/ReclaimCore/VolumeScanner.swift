@@ -332,25 +332,16 @@ public enum VolumeScanner {
             var listed: [StorageNode] = []
             var unlisted: Int64 = 0
 
-            let entries: [FileSpace.Listing]
+            // Streamed rather than listed whole: a cache directory holds tens of
+            // thousands of entries, and buffering one means no progress and no
+            // cancel until the last is decoded. `continue` becomes `return true`
+            // and `break` becomes `return false`.
             do {
-                entries = try FileSpace.contents(of: directory.path)
-            } catch {
-                unreadable.note(directory.path)
-                return StorageNode(url: directory,
-                                   name: directory.lastPathComponent,
-                                   physicalBytes: 0,
-                                   reclaimableBytes: 0,
-                                   isDirectory: true,
-                                   children: [],
-                                   unlistedBytes: 0)
-            }
-
-            for listing in entries {
-                if isCancelled() { break }
+                try FileSpace.stream(directory.path) { listing in
+                if isCancelled() { return false }
                 let child = directory.appendingPathComponent(listing.name)
 
-                if skipping.contains(child.path) { continue }
+                if skipping.contains(child.path) { return true }
 
                 let entry = listing.entry
                 guard entry.device == device, !entry.isMountPoint else {
@@ -358,14 +349,14 @@ public enum VolumeScanner {
                     // counting one would inflate the tally with entries that
                     // cost the user no space either way.
                     if entry.kind != .other { offVolume.note(child.path) }
-                    continue
+                    return true
                 }
 
                 switch entry.kind {
                 case .directory:
                     if entry.isCloudPlaceholder {
                         cloudOnly.note(child.path)
-                        continue
+                        return true
                     }
                     let below = Self.resolvedDevice(child.path, default: device)
                     if below != device { firmlinks += 1 }
@@ -380,7 +371,7 @@ public enum VolumeScanner {
                 case .file:
                     guard !entry.isCloudPlaceholder,
                           ledger.claim(device: entry.device, inode: entry.inode)
-                    else { continue }
+                    else { return true }
                     let bytes = entry.allocatedBytes
                     total += bytes
                     free += entry.reclaimableBytes
@@ -398,7 +389,7 @@ public enum VolumeScanner {
                         unlisted += bytes
                     }
                 case .other:
-                    continue
+                    return true
                 }
 
                 let now = Date()
@@ -406,6 +397,17 @@ public enum VolumeScanner {
                     lastReport = now
                     onProgress(Tick(bytes: scanned, location: directory.path))
                 }
+                return true
+                }
+            } catch {
+                unreadable.note(directory.path)
+                return StorageNode(url: directory,
+                                   name: directory.lastPathComponent,
+                                   physicalBytes: 0,
+                                   reclaimableBytes: 0,
+                                   isDirectory: true,
+                                   children: [],
+                                   unlistedBytes: 0)
             }
 
             listed.sort { $0.physicalBytes > $1.physicalBytes }

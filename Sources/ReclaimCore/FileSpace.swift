@@ -251,6 +251,20 @@ public enum FileSpace {
     /// scan; asking the kernel for a directory at a time is what turns minutes
     /// into seconds.
     public static func contents(of path: String) throws -> [Listing] {
+        var found: [Listing] = []
+        try stream(path) { found.append($0); return true }
+        return found
+    }
+
+    /// Hands entries out in the batches the kernel returns them in, stopping
+    /// when `body` returns false.
+    ///
+    /// A browser cache holds tens of thousands of files in one directory. A
+    /// caller that only sees them once the last one is decoded cannot report
+    /// progress or honour a cancel for as long as that read takes, and it
+    /// holds the whole listing in memory to no purpose — on every walking
+    /// thread at once.
+    public static func stream(_ path: String, _ body: (Listing) -> Bool) throws {
         let directory = open(path, O_RDONLY | O_DIRECTORY)
         guard directory >= 0 else {
             switch errno {
@@ -266,21 +280,20 @@ public enum FileSpace {
 
         var list = request()
         var buffer = [UInt8](repeating: 0, count: 64 << 10)
-        var found: [Listing] = []
         while true {
             let count = buffer.withUnsafeMutableBytes {
                 getattrlistbulk(directory, &list, $0.baseAddress, $0.count, UInt64(options))
             }
             guard count > 0 else {
                 guard count == 0 else { throw ListingError.failed(errno) }
-                return found
+                return
             }
             var offset = 0
             for _ in 0 ..< count {
                 guard let (length, listing) = buffer.withUnsafeBytes({
                     decode($0, at: offset, fallbackDevice: info.st_dev)
                 }) else { throw ListingError.failed(EIO) }
-                found.append(listing)
+                if !body(listing) { return }
                 offset += length
             }
         }

@@ -66,6 +66,8 @@ extension String {
 @main
 struct CLI {
     static func main() async {
+        FileSpace.refuseToMaterialisePlaceholders()
+
         var args = Array(CommandLine.arguments.dropFirst())
         let confirm = args.contains("--confirm")
         args.removeAll { $0 == "--confirm" }

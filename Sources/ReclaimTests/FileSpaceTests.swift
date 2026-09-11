@@ -212,6 +212,29 @@ func overwrite(_ url: URL, atOffset offset: Int, bytes: Int) {
                 "every entry names the device its bytes are on")
     }
 
+    // A browser cache holds tens of thousands of files in one directory, and
+    // buffering the listing whole is what freezes a progress bar for as long
+    // as the read takes: the caller's loop cannot start until the last entry
+    // is decoded. Three thousand entries span several kernel batches, which is
+    // the smallest fixture that can tell streaming from buffering.
+    do {
+        let root = makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for index in 0 ..< 3_000 {
+            writeFile(1, to: root.appendingPathComponent("f\(index).bin"))
+        }
+
+        var streamed: [String] = []
+        try! FileSpace.stream(root.path) { streamed.append($0.name); return true }
+        t.equal(streamed.sorted(),
+                ((try? FileSpace.contents(of: root.path)) ?? []).map(\.name).sorted(),
+                "streaming visits exactly what buffering returns")
+
+        var seen = 0
+        try! FileSpace.stream(root.path) { _ in seen += 1; return false }
+        t.equal(seen, 1, "a caller that stops after one entry is not handed the rest")
+    }
+
     // Rendering a directory the process was refused as empty is the failure that
     // makes a disk tool untrustworthy: it reports space as reclaimed that was
     // never looked at. Refusal and absence have to arrive as different answers.

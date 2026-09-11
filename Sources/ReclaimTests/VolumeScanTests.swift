@@ -159,6 +159,28 @@ private final class Collector: @unchecked Sendable {
             IOPOL_MATERIALIZE_DATALESS_FILES_OFF,
             "the process refuses to fetch a placeholder's bytes")
 
+    // Reading the policy back proves the call works, not that anyone makes it,
+    // and the policy is per-process: the app calling it does nothing for the
+    // CLI. Forgetting does not produce a wrong number, which is what makes it
+    // hard to notice — it produces a walk that stalls for minutes while the
+    // file provider fetches bytes nobody asked for.
+    do {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        var missing: [String] = []
+        for area in ["Sources/DiskReclaim", "Sources/reclaim"] {
+            let found = FileManager.default.enumerator(at: root.appendingPathComponent(area),
+                                                       includingPropertiesForKeys: nil)?
+                .allObjects as? [URL] ?? []
+            let calls = found.filter { $0.pathExtension == "swift" }.contains { file in
+                (try? String(contentsOf: file, encoding: .utf8))?
+                    .contains("refuseToMaterialisePlaceholders()") ?? false
+            }
+            if !calls { missing.append(area) }
+        }
+        t.expect(missing.isEmpty, "every executable that walks the disk refuses first \(missing)")
+    }
+
     do {
         let root = makeTree()
         defer { try? FileManager.default.removeItem(at: root) }
