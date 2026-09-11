@@ -105,9 +105,9 @@ private final class Assembly: @unchecked Sendable {
     private let lock = NSLock()
     private var running: [String: Int64] = [:]
     private var done: [String: StorageNode] = [:]
-    private var unreadable = 0
-    private var cloudOnly = 0
-    private var offVolume = 0
+    private var unreadable = Locations()
+    private var cloudOnly = Locations()
+    private var offVolume = Locations()
     private var firmlinks = 0
     private var unproven: Int64 = 0
     private var location = ""
@@ -122,26 +122,52 @@ private final class Assembly: @unchecked Sendable {
     }
 
     func finish(_ path: String, _ node: StorageNode,
-                unreadable: Int, cloudOnly: Int, offVolume: Int,
+                unreadable: Locations, cloudOnly: Locations, offVolume: Locations,
                 firmlinks: Int, unproven: Int64) {
         lock.withLock {
             running[path] = nil
             done[path] = node
-            self.unreadable += unreadable
-            self.cloudOnly += cloudOnly
-            self.offVolume += offVolume
+            self.unreadable.merge(unreadable)
+            self.cloudOnly.merge(cloudOnly)
+            self.offVolume.merge(offVolume)
             self.firmlinks += firmlinks
             self.unproven += unproven
         }
     }
 
-    func read() -> (running: [String: Int64], done: [StorageNode], unreadable: Int,
-                    cloudOnly: Int, offVolume: Int, firmlinks: Int,
+    func read() -> (running: [String: Int64], done: [StorageNode], unreadable: Locations,
+                    cloudOnly: Locations, offVolume: Locations, firmlinks: Int,
                     unproven: Int64, location: String) {
         lock.withLock {
             (running, Array(done.values), unreadable, cloudOnly, offVolume, firmlinks,
              unproven, location)
         }
+    }
+}
+
+/// Somewhere the walk could not account for, kept by name as well as by number.
+///
+/// A count tells someone bytes are missing and leaves them no way to find out
+/// which; a folder that reads as empty because it was refused is otherwise
+/// indistinguishable from one that is empty. The count stays exact and the list
+/// is capped, because a scan of `/` without Full Disk Access refuses thousands
+/// of directories and nobody clicks through thousands of rows.
+public struct Locations: Sendable, Equatable {
+    public private(set) var count = 0
+    public private(set) var paths: [String] = []
+
+    private static let sample = 200
+
+    public init() {}
+
+    public mutating func note(_ path: String) {
+        count += 1
+        if paths.count < Self.sample { paths.append(path) }
+    }
+
+    public mutating func merge(_ other: Locations) {
+        count += other.count
+        paths += other.paths.prefix(Self.sample - min(Self.sample, paths.count))
     }
 }
 
@@ -156,16 +182,16 @@ public enum VolumeScanner {
         /// Directories the process was refused. Almost always missing Full Disk
         /// Access; surfacing the count is the difference between "you have no
         /// large files here" and "I was not allowed to look".
-        public var unreadableLocations: Int
+        public var unreadable: Locations
         /// Directories deliberately stepped around because their contents are on
         /// a server. They hold no local bytes, so the total is unaffected — but
         /// a OneDrive folder reading as empty needs an explanation.
-        public var cloudOnlyLocations: Int
+        public var cloudOnly: Locations
         /// Entries the walk stopped at because their bytes are on a different
         /// volume — a mounted image, a network share. Stopping is correct;
         /// doing it silently is not, because the folder then reads as empty
         /// rather than as unmeasured.
-        public var offVolumeLocations: Int
+        public var offVolume: Locations
         /// Places where the walk crossed onto another APFS volume in the same
         /// container and kept going. macOS firmlinks the Data volume into `/`,
         /// so a scan of `Macintosh HD` reaches `/Users` and `/Applications`
@@ -185,18 +211,25 @@ public enum VolumeScanner {
         public var unprovenBytes: Int64
 
         public init(root: StorageNode,
-                    unreadableLocations: Int,
-                    cloudOnlyLocations: Int,
-                    offVolumeLocations: Int,
+                    unreadable: Locations = Locations(),
+                    cloudOnly: Locations = Locations(),
+                    offVolume: Locations = Locations(),
                     firmlinkCrossings: Int = 0,
                     unprovenBytes: Int64) {
             self.root = root
-            self.unreadableLocations = unreadableLocations
-            self.cloudOnlyLocations = cloudOnlyLocations
-            self.offVolumeLocations = offVolumeLocations
+            self.unreadable = unreadable
+            self.cloudOnly = cloudOnly
+            self.offVolume = offVolume
             self.firmlinkCrossings = firmlinkCrossings
             self.unprovenBytes = unprovenBytes
         }
+
+        public var unreadableLocations: Int { unreadable.count }
+        public var cloudOnlyLocations: Int { cloudOnly.count }
+        public var offVolumeLocations: Int { offVolume.count }
+        public var unreadablePaths: [String] { unreadable.paths }
+        public var cloudOnlyPaths: [String] { cloudOnly.paths }
+        public var offVolumePaths: [String] { offVolume.paths }
     }
 
     /// The volume a directory's contents are really on.
@@ -225,9 +258,9 @@ public enum VolumeScanner {
     /// Everything measured so far, and which branches are still climbing.
     public struct Progress: Sendable {
         public var root: StorageNode
-        public var unreadableLocations: Int
-        public var cloudOnlyLocations: Int
-        public var offVolumeLocations: Int
+        public var unreadable: Locations
+        public var cloudOnly: Locations
+        public var offVolume: Locations
         public var firmlinkCrossings: Int
         public var unprovenBytes: Int64
         /// Node ids whose totals are not final yet. The blocks are real; their
@@ -236,22 +269,26 @@ public enum VolumeScanner {
         public var location: String
 
         public init(root: StorageNode,
-                    unreadableLocations: Int,
-                    cloudOnlyLocations: Int,
-                    offVolumeLocations: Int,
+                    unreadable: Locations = Locations(),
+                    cloudOnly: Locations = Locations(),
+                    offVolume: Locations = Locations(),
                     firmlinkCrossings: Int = 0,
                     unprovenBytes: Int64,
                     measuring: Set<String>,
                     location: String) {
             self.root = root
-            self.unreadableLocations = unreadableLocations
-            self.cloudOnlyLocations = cloudOnlyLocations
-            self.offVolumeLocations = offVolumeLocations
+            self.unreadable = unreadable
+            self.cloudOnly = cloudOnly
+            self.offVolume = offVolume
             self.firmlinkCrossings = firmlinkCrossings
             self.unprovenBytes = unprovenBytes
             self.measuring = measuring
             self.location = location
         }
+
+        public var unreadableLocations: Int { unreadable.count }
+        public var cloudOnlyLocations: Int { cloudOnly.count }
+        public var offVolumeLocations: Int { offVolume.count }
     }
 
     public static let defaultListThreshold: Int64 = 24 * 1024 * 1024
@@ -277,9 +314,9 @@ public enum VolumeScanner {
         // looking at.
         let device = probe.device
 
-        var unreadable = 0
-        var cloudOnly = 0
-        var offVolume = 0
+        var unreadable = Locations()
+        var cloudOnly = Locations()
+        var offVolume = Locations()
         var firmlinks = 0
         var unproven: Int64 = 0
         var scanned: Int64 = 0
@@ -299,7 +336,7 @@ public enum VolumeScanner {
             do {
                 entries = try FileSpace.contents(of: directory.path)
             } catch {
-                unreadable += 1
+                unreadable.note(directory.path)
                 return StorageNode(url: directory,
                                    name: directory.lastPathComponent,
                                    physicalBytes: 0,
@@ -320,14 +357,14 @@ public enum VolumeScanner {
                     // A symlink or socket holds nothing wherever it lives, so
                     // counting one would inflate the tally with entries that
                     // cost the user no space either way.
-                    if entry.kind != .other { offVolume += 1 }
+                    if entry.kind != .other { offVolume.note(child.path) }
                     continue
                 }
 
                 switch entry.kind {
                 case .directory:
                     if entry.isCloudPlaceholder {
-                        cloudOnly += 1
+                        cloudOnly.note(child.path)
                         continue
                     }
                     let below = Self.resolvedDevice(child.path, default: device)
@@ -390,9 +427,6 @@ public enum VolumeScanner {
                                    children: [],
                                    unlistedBytes: 0)
             return Result(root: node,
-                          unreadableLocations: 0,
-                          cloudOnlyLocations: 0,
-                          offVolumeLocations: 0,
                           unprovenBytes: probe.sharing == .partial
                               ? probe.allocatedBytes - probe.reclaimableBytes : 0)
         }
@@ -405,17 +439,19 @@ public enum VolumeScanner {
                                             isDirectory: true,
                                             children: [],
                                             unlistedBytes: 0),
-                          unreadableLocations: 0,
-                          cloudOnlyLocations: 1,
-                          offVolumeLocations: 0,
+                          cloudOnly: {
+                              var only = Locations()
+                              only.note(url.path)
+                              return only
+                          }(),
                           unprovenBytes: 0)
         }
 
         let root = walk(url, device: device)
         return Result(root: root,
-                      unreadableLocations: unreadable,
-                      cloudOnlyLocations: cloudOnly,
-                      offVolumeLocations: offVolume,
+                      unreadable: unreadable,
+                      cloudOnly: cloudOnly,
+                      offVolume: offVolume,
                       firmlinkCrossings: firmlinks,
                       unprovenBytes: unproven)
     }
@@ -449,9 +485,9 @@ public enum VolumeScanner {
             let whole = try scan(url, listThreshold: listThreshold, skipping: skipping,
                                  isCancelled: isCancelled)
             onUpdate(Progress(root: whole.root,
-                              unreadableLocations: whole.unreadableLocations,
-                              cloudOnlyLocations: whole.cloudOnlyLocations,
-                              offVolumeLocations: whole.offVolumeLocations,
+                              unreadable: whole.unreadable,
+                              cloudOnly: whole.cloudOnly,
+                              offVolume: whole.offVolume,
                               unprovenBytes: whole.unprovenBytes,
                               measuring: [],
                               location: url.path))
@@ -468,8 +504,8 @@ public enum VolumeScanner {
         var fileUnlisted: Int64 = 0
         var fileFree: Int64 = 0
         var fileUnproven: Int64 = 0
-        var placeholders = 0
-        var crossings = 0
+        var placeholders = Locations()
+        var crossings = Locations()
         var firmlinkSplits = 0
 
         for listing in entries {
@@ -481,14 +517,14 @@ public enum VolumeScanner {
             // bulk read does not. Left alone, splitting the walk here is what
             // lets a mounted image be counted that the serial walk excludes.
             guard entry.device == device, !entry.isMountPoint else {
-                if entry.kind != .other { crossings += 1 }
+                if entry.kind != .other { crossings.note(child.path) }
                 continue
             }
 
             switch entry.kind {
             case .directory:
                 if entry.isCloudPlaceholder {
-                    placeholders += 1
+                    placeholders.note(child.path)
                     continue
                 }
                 // Counted here rather than inside the branch: the branch scan
@@ -567,10 +603,14 @@ public enum VolumeScanner {
                                    isDirectory: true,
                                    children: listed,
                                    unlistedBytes: unlisted)
+            var cloudOnly = rootCloudOnly
+            cloudOnly.merge(state.cloudOnly)
+            var offVolume = rootOffVolume
+            offVolume.merge(state.offVolume)
             return Progress(root: root,
-                            unreadableLocations: state.unreadable,
-                            cloudOnlyLocations: rootCloudOnly + state.cloudOnly,
-                            offVolumeLocations: rootOffVolume + state.offVolume,
+                            unreadable: state.unreadable,
+                            cloudOnly: cloudOnly,
+                            offVolume: offVolume,
                             firmlinkCrossings: rootFirmlinks + state.firmlinks,
                             unprovenBytes: rootUnproven + state.unproven,
                             measuring: Set(state.running.keys),
@@ -619,14 +659,16 @@ public enum VolumeScanner {
                                                     isDirectory: true,
                                                     children: [],
                                                     unlistedBytes: 0),
-                                  unreadableLocations: 1,
-                                  cloudOnlyLocations: 0,
-                                  offVolumeLocations: 0,
+                                  unreadable: {
+                                      var refused = Locations()
+                                      refused.note(branch.path)
+                                      return refused
+                                  }(),
                                   unprovenBytes: 0)
                     assembly.finish(branch.path, result.root,
-                                    unreadable: result.unreadableLocations,
-                                    cloudOnly: result.cloudOnlyLocations,
-                                    offVolume: result.offVolumeLocations,
+                                    unreadable: result.unreadable,
+                                    cloudOnly: result.cloudOnly,
+                                    offVolume: result.offVolume,
                                     firmlinks: result.firmlinkCrossings,
                                     unproven: result.unprovenBytes)
                     emit()
@@ -639,9 +681,9 @@ public enum VolumeScanner {
         let final = snapshot()
         mouth.withLock { onUpdate(final) }
         return Result(root: final.root,
-                      unreadableLocations: final.unreadableLocations,
-                      cloudOnlyLocations: final.cloudOnlyLocations,
-                      offVolumeLocations: final.offVolumeLocations,
+                      unreadable: final.unreadable,
+                      cloudOnly: final.cloudOnly,
+                      offVolume: final.offVolume,
                       firmlinkCrossings: final.firmlinkCrossings,
                       unprovenBytes: final.unprovenBytes)
     }

@@ -62,6 +62,11 @@ final class StorageModel {
     /// weave the Data volume into `/`. Scanning `/` meets a few hundred, and
     /// about 9 GB sits behind the ones under `/System/Library` alone.
     private(set) var offVolumeLocations = 0
+    /// The same three by name. A count says bytes are missing; only the list
+    /// lets someone go and look at what is missing them.
+    private(set) var unreadablePaths: [String] = []
+    private(set) var cloudOnlyPaths: [String] = []
+    private(set) var offVolumePaths: [String] = []
     /// Points where the walk moved onto another APFS volume in the same
     /// container and carried on. Not a fault and not a gap — the bytes past one
     /// are counted — but they belong to a volume the user did not name.
@@ -72,11 +77,17 @@ final class StorageModel {
     private(set) var unprovenBytes: Int64 = 0
     private(set) var scannedAt: Date?
     private(set) var lastAction: String?
+    /// What the chosen volume holds and has left, read in a syscall so the
+    /// window is never blank while a walk that takes a minute gets going.
+    private(set) var space: VolumeLedger.Space?
 
     var root: Root
     /// Node ids from the tree root down to what is on screen.
     private(set) var trail: [String] = []
-    var selection: Set<String> = [] { didSet { reestimate() } }
+    /// Picks survive walking into another folder, which is the difference
+    /// between one delete with one honest total and four separate ones.
+    private(set) var collector = Collector() { didSet { reestimate() } }
+    var selection: Set<String> { collector.ids }
     /// What the current selection would actually return to the volume.
     private(set) var selectedBytes: Int64 = 0
     /// True while the exact figure is still being worked out. Until it lands,
@@ -99,6 +110,7 @@ final class StorageModel {
         roots = found
         root = found[0]
         manifest = .standard
+        space = VolumeLedger.space(at: found[0].url)
     }
 
     /// Browsable volumes first, then the ones macOS hides. Those hidden volumes
@@ -151,12 +163,10 @@ final class StorageModel {
     func open(_ node: StorageNode) {
         guard node.isExplorable else { return }
         trail.append(node.id)
-        selection = []
     }
 
     func rise(to depth: Int) {
         trail = Array(trail.prefix(depth))
-        selection = []
     }
 
     // MARK: - Scanning
@@ -164,6 +174,10 @@ final class StorageModel {
     func choose(_ next: Root) {
         guard next != root else { return }
         root = next
+        space = VolumeLedger.space(at: next.url)
+        // Picks name paths on the volume being left. Carrying them across would
+        // put another disk's bytes in this disk's total.
+        collector.removeAll()
         scan()
     }
 
@@ -175,12 +189,14 @@ final class StorageModel {
 
         tree = nil
         trail = []
-        selection = []
         progress = nil
         measuring = []
         unreadableLocations = 0
         cloudOnlyLocations = 0
         offVolumeLocations = 0
+        unreadablePaths = []
+        cloudOnlyPaths = []
+        offVolumePaths = []
         firmlinkCrossings = 0
         unprovenBytes = 0
         isScanning = true
@@ -204,6 +220,9 @@ final class StorageModel {
             unreadableLocations = result?.unreadableLocations ?? 0
             cloudOnlyLocations = result?.cloudOnlyLocations ?? 0
             offVolumeLocations = result?.offVolumeLocations ?? 0
+            unreadablePaths = result?.unreadablePaths ?? []
+            cloudOnlyPaths = result?.cloudOnlyPaths ?? []
+            offVolumePaths = result?.offVolumePaths ?? []
             firmlinkCrossings = result?.firmlinkCrossings ?? 0
             unprovenBytes = result?.unprovenBytes ?? 0
             measuring = []
@@ -220,6 +239,9 @@ final class StorageModel {
         unreadableLocations = update.unreadableLocations
         cloudOnlyLocations = update.cloudOnlyLocations
         offVolumeLocations = update.offVolumeLocations
+        unreadablePaths = update.unreadable.paths
+        cloudOnlyPaths = update.cloudOnly.paths
+        offVolumePaths = update.offVolume.paths
         firmlinkCrossings = update.firmlinkCrossings
         unprovenBytes = update.unprovenBytes
         progress = VolumeScanner.Tick(bytes: update.root.reclaimableBytes, location: update.location)
@@ -235,7 +257,7 @@ final class StorageModel {
 
     // MARK: - Selection
 
-    var selectedNodes: [StorageNode] { listing.filter { selection.contains($0.id) } }
+    var selectedNodes: [StorageNode] { collector.items }
 
     /// The tree already knows what each branch frees on its own, and that is a
     /// floor available for nothing. What it cannot know is that two selected
@@ -244,14 +266,14 @@ final class StorageModel {
     /// goes up at once and the real number replaces it a moment later.
     private func reestimate() {
         estimateTask?.cancel()
-        let roots = selectedNodes
-        selectedBytes = roots.reduce(0) { $0 + $1.reclaimableBytes }
-        guard !roots.isEmpty else {
+        let floor = collector.floorBytes
+        selectedBytes = floor
+        guard !collector.isEmpty else {
             isEstimating = false
             return
         }
 
-        let urls = roots.map(\.url)
+        let urls = collector.urls
         let unproven = unprovenBytes
         isEstimating = true
         estimateTask = Task { [weak self] in
@@ -262,19 +284,23 @@ final class StorageModel {
                 SelectionSpace.estimate(urls, volumeUnproven: unproven)
             }.value
             guard !Task.isCancelled else { return }
-            self?.selectedBytes = estimate.bytes
+            // Counting the picks together can only find blocks that counting them
+            // one at a time missed, so the exact figure is never below the floor
+            // it replaces. Clamping says so: a reclaim total that shrinks while
+            // you watch is the most alarming thing a disk tool can show, and if
+            // it ever could shrink the bug is upstream, not in the label.
+            self?.selectedBytes = max(estimate.bytes, floor)
             self?.isEstimating = false
         }
     }
 
-    var selectionIsTrashable: Bool {
-        !selectedNodes.isEmpty && selectedNodes.allSatisfy { risk(of: $0).isTrashable }
-    }
-
     func toggle(_ node: StorageNode) {
         guard !measuring.contains(node.id) else { return }
-        if selection.contains(node.id) { selection.remove(node.id) } else { selection.insert(node.id) }
+        collector.toggle(node)
     }
+
+    func discard(id: String) { collector.remove(id: id) }
+    func clearCollector() { collector.removeAll() }
 
     func risk(of node: StorageNode) -> StorageRisk { StorageSafety.risk(for: node.url) }
 
@@ -306,7 +332,7 @@ final class StorageModel {
         }
 
         tree = tree?.removing(gone)
-        selection = []
+        collector.removeAll()
         lastAction = failed == 0
             ? "Moved \(humanBytes(moved)) to the Trash. Empty it to get the space back."
             : "Moved \(humanBytes(moved)) to the Trash. \(failed) could not be moved."
@@ -328,5 +354,9 @@ final class StorageModel {
 
     func reveal(_ node: StorageNode) {
         NSWorkspace.shared.activateFileViewerSelecting([node.url])
+    }
+
+    func reveal(path: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 }

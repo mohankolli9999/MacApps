@@ -127,6 +127,27 @@ public enum VolumeLedger {
             && parts[3] != "Data"
     }
 
+    /// What a volume holds and what is left, without walking it.
+    public struct Space: Sendable, Equatable {
+        public let capacity: Int64
+        public let free: Int64
+        public var used: Int64 { capacity - free }
+    }
+
+    /// Answers in a syscall what a scan takes a minute to reach, so the window
+    /// has something true on it from the first frame. "Important usage" rather
+    /// than raw availability because it is the figure Finder shows, and quoting
+    /// a different free-space number than the rest of the Mac reads as a bug.
+    public static func space(at url: URL) -> Space? {
+        let keys: Set<URLResourceKey> = [.volumeTotalCapacityKey,
+                                         .volumeAvailableCapacityForImportantUsageKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              let capacity = values.volumeTotalCapacity,
+              let free = values.volumeAvailableCapacityForImportantUsage
+        else { return nil }
+        return Space(capacity: Int64(capacity), free: min(free, Int64(capacity)))
+    }
+
     public static func purgeableBytes(at url: URL) -> Int64? {
         let keys: Set<URLResourceKey> = [.volumeAvailableCapacityKey,
                                          .volumeAvailableCapacityForImportantUsageKey]

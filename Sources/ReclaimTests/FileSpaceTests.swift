@@ -358,3 +358,95 @@ func overwrite(_ url: URL, atOffset offset: Int, bytes: Int) {
                 "with nothing outside holding them, the same blocks do come free")
     }
 }
+
+@MainActor func runCollectorTests(_ t: Harness) {
+    t.section("Collector")
+
+    func node(_ path: String, physical: Int64 = 1 << 20, free: Int64 = 1 << 20) -> StorageNode {
+        StorageNode(url: URL(fileURLWithPath: path),
+                    name: (path as NSString).lastPathComponent,
+                    physicalBytes: physical,
+                    reclaimableBytes: free,
+                    isDirectory: true,
+                    children: [],
+                    unlistedBytes: 0)
+    }
+
+    let home = NSHomeDirectory()
+
+    // The whole point of a tray: picks made in one folder outlive walking into
+    // another. Per-directory selection made gathering from four places into four
+    // separate deletes, each quoting its own number.
+    do {
+        var tray = Collector()
+        tray.add(node("\(home)/Downloads/big.dmg"))
+        tray.add(node("\(home)/Movies/old.mov"))
+        t.equal(tray.count, 2, "picks from two different folders both stay")
+        t.equal(tray.floorBytes, 2 << 20, "and the floor is the sum of what each frees alone")
+    }
+
+    do {
+        var tray = Collector()
+        let same = node("\(home)/Downloads/big.dmg")
+        tray.add(same)
+        tray.add(same)
+        t.equal(tray.count, 1, "picking the same thing twice picks it once")
+    }
+
+    // An ancestor already carries its children's bytes. Holding both double-counts
+    // the floor, and trashing the parent first leaves the child a path to nowhere.
+    do {
+        var tray = Collector()
+        tray.add(node("\(home)/Downloads/archive", free: 8 << 20))
+        tray.add(node("\(home)/Downloads/archive/big.dmg", free: 2 << 20))
+        t.equal(tray.count, 1, "a child cannot join a tray that already holds its parent")
+        t.equal(tray.floorBytes, 8 << 20, "so the parent's total is not counted twice")
+
+        var other = Collector()
+        other.add(node("\(home)/Downloads/archive/big.dmg", free: 2 << 20))
+        other.add(node("\(home)/Downloads/archive", free: 8 << 20))
+        t.equal(other.count, 1, "and adding the parent afterwards absorbs the child")
+        t.equal(other.floorBytes, 8 << 20, "leaving the parent's total, not the sum")
+
+        var sibling = Collector()
+        sibling.add(node("\(home)/Downloads/one", free: 1 << 20))
+        sibling.add(node("\(home)/Downloads/one-more", free: 1 << 20))
+        t.equal(sibling.count, 2,
+                "a name that merely starts with another's is not inside it")
+    }
+
+    // The tray is what the Trash button acts on, so anything the app must never
+    // remove has to be refused at the door rather than filtered at the end.
+    do {
+        var tray = Collector()
+        tray.add(node(home))
+        tray.add(node("\(home)/Documents"))
+        tray.add(node("/System/Library/Fonts"))
+        tray.add(node("/Library/Caches"))
+        t.expect(tray.isEmpty, "home, its fixtures, and anything outside your control stay out")
+
+        t.expect(!Collector.admits(node("\(home)/Library")),
+                 "a standard home folder is a fixture, not an item")
+        t.expect(Collector.admits(node("\(home)/Library/Caches/pip")),
+                 "something inside one is still fair game")
+    }
+
+    do {
+        var tray = Collector()
+        let pick = node("\(home)/Downloads/big.dmg")
+        tray.add(pick)
+        t.expect(tray.contains(pick.id), "what went in can be found by id")
+        tray.remove(id: pick.id)
+        t.expect(tray.isEmpty, "and taken back out again")
+        t.equal(tray.floorBytes, 0, "with the number following it out")
+    }
+
+    do {
+        var tray = Collector()
+        tray.add(node("\(home)/Downloads/a", physical: 9 << 20, free: 1 << 20))
+        t.equal(tray.physicalBytes, 9 << 20, "the tray knows what its picks occupy")
+        t.equal(tray.floorBytes, 1 << 20, "as well as what removing them returns")
+        tray.removeAll()
+        t.expect(tray.isEmpty, "and it can be emptied in one go")
+    }
+}

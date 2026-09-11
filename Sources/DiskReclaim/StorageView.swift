@@ -11,6 +11,8 @@ struct StorageView: View {
     @State private var hovered: String?
     @State private var confirming = false
     @State private var paused = true
+    /// Which footer counter has its list open, if any.
+    @State private var opened: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,6 +39,7 @@ struct StorageView: View {
                     listing.frame(width: 300)
                 }
                 Divider().overlay(Theme.hairline)
+                if !model.collector.isEmpty { tray }
                 footer
             }
         }
@@ -129,6 +132,7 @@ struct StorageView: View {
     private var opening: some View {
         VStack(spacing: 10) {
             Spacer()
+            capacity
             ProgressView().controlSize(.small)
             Text("Opening \(model.root.name)")
                 .font(.system(size: 12))
@@ -138,6 +142,33 @@ struct StorageView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// The one true thing available before any walking happens.
+    ///
+    /// A full scan is a minute or more and every frame of it used to be blank,
+    /// which is indistinguishable from a hung app and is most of what "the app
+    /// is slow" actually describes. This costs a syscall and answers the first
+    /// question anyone opens the app with.
+    @ViewBuilder private var capacity: some View {
+        if let space = model.space {
+            VStack(spacing: 7) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Theme.hairline.opacity(0.6))
+                        Capsule().fill(Theme.ink.opacity(0.55))
+                            .frame(width: geo.size.width
+                                   * min(1, Double(space.used) / Double(max(1, space.capacity))))
+                    }
+                }
+                .frame(width: 320, height: 6)
+
+                Text("\(humanBytes(space.used)) used · \(humanBytes(space.free)) free of \(humanBytes(space.capacity))")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.muted)
+            }
+            .padding(.bottom, 6)
+        }
     }
 
     /// The map is live from the first branch, so the running total belongs in a
@@ -182,6 +213,7 @@ struct StorageView: View {
     private var idle: some View {
         VStack(spacing: 12) {
             Spacer()
+            capacity
             Text("Measure \(model.root.name)")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.ink)
@@ -326,6 +358,63 @@ struct StorageView: View {
         .help("Items under \(humanBytes(VolumeScanner.defaultListThreshold)) are counted here rather than drawn.")
     }
 
+    // MARK: - Tray
+
+    /// Everything picked so far, from wherever it was picked.
+    ///
+    /// Selection used to be scoped to the folder on screen and cleared on the
+    /// way out of it, so clearing 40 GB spread over five folders meant five
+    /// deletes, each quoting a number that ignored the other four. Holding the
+    /// picks makes it one act — and lets the estimate see two clones of each
+    /// other at once, which is the only way its total can be exact.
+    private var tray: some View {
+        HStack(spacing: 10) {
+            Text("Picked")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.muted)
+
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ForEach(model.collector.items) { node in
+                        HStack(spacing: 5) {
+                            Circle().fill(RiskStyle.hue(model.risk(of: node)))
+                                .frame(width: 6, height: 6)
+                            Text(node.name)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.ink)
+                                .lineLimit(1)
+                            Text(humanBytes(node.reclaimableBytes))
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(Theme.muted)
+                            Button { model.discard(id: node.id) } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundStyle(Theme.muted)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Take out of the tray")
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Theme.ink.opacity(0.07)))
+                        .help(node.url.path)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+            .scrollIndicators(.never)
+
+            Button("Clear") { model.clearCollector() }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Theme.stageEdge)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    }
+
     // MARK: - Footer
 
     private var footer: some View {
@@ -334,22 +423,37 @@ struct StorageView: View {
             riskKey(.yours)
             riskKey(.risky)
 
+            if model.unreadableLocations > 0 {
+                counter(id: "unreadable",
+                        label: model.unreadableLocations == 1
+                            ? "1 folder could not be read"
+                            : "\(model.unreadableLocations) folders could not be read",
+                        note: "The scan was refused these, so their bytes are missing from every total above. Full Disk Access is almost always the reason.",
+                        paths: model.unreadablePaths,
+                        total: model.unreadableLocations,
+                        tint: Theme.warn)
+            }
+
             if model.cloudOnlyLocations > 0 {
-                Text(model.cloudOnlyLocations == 1
-                     ? "1 folder stored online"
-                     : "\(model.cloudOnlyLocations) folders stored online")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.muted)
-                    .help("iCloud, OneDrive and Dropbox keep folders whose contents live on a server. They take no space here, and opening one would download it, so the scan leaves them alone.")
+                counter(id: "cloud",
+                        label: model.cloudOnlyLocations == 1
+                            ? "1 folder stored online"
+                            : "\(model.cloudOnlyLocations) folders stored online",
+                        note: "iCloud, OneDrive and Dropbox keep folders whose contents live on a server. They take no space here, and opening one would download it, so the scan leaves them alone.",
+                        paths: model.cloudOnlyPaths,
+                        total: model.cloudOnlyLocations,
+                        tint: Theme.muted)
             }
 
             if model.offVolumeLocations > 0 {
-                Text(model.offVolumeLocations == 1
-                     ? "1 place on another disk"
-                     : "\(model.offVolumeLocations) places on other disks")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.muted)
-                    .help("The scan stops where a folder continues onto a mounted disk image or a network share. Those bytes belong to that disk, so they are missing from the totals here.")
+                counter(id: "offvolume",
+                        label: model.offVolumeLocations == 1
+                            ? "1 place on another disk"
+                            : "\(model.offVolumeLocations) places on other disks",
+                        note: "The scan stops where a folder continues onto a mounted disk image or a network share. Those bytes belong to that disk, so they are missing from the totals here.",
+                        paths: model.offVolumePaths,
+                        total: model.offVolumeLocations,
+                        tint: Theme.muted)
             }
 
             // Deliberately worded as somewhere the scan *went*, not somewhere it
@@ -390,6 +494,72 @@ struct StorageView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+    }
+
+    /// A tally of places the totals could not reach, and the places themselves.
+    ///
+    /// The count alone says some number of gigabytes is unaccounted for and
+    /// gives nobody a way to find out which — which reads as a bug in a tool
+    /// whose entire claim is that its number is honest.
+    private func counter(id: String,
+                         label: String,
+                         note: String,
+                         paths: [String],
+                         total: Int,
+                         tint: Color) -> some View {
+        Button { opened = opened == id ? nil : id } label: {
+            HStack(spacing: 4) {
+                Text(label).font(.system(size: 11)).foregroundStyle(tint)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundStyle(tint.opacity(0.7))
+            }
+        }
+        .buttonStyle(.plain)
+        .help(note)
+        .popover(isPresented: Binding(get: { opened == id },
+                                      set: { if !$0 { opened = nil } }),
+                 arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(note)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                Divider().overlay(Theme.hairline)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(paths, id: \.self) { path in
+                            Button { model.reveal(path: path) } label: {
+                                Text(abbreviate(path))
+                                    .font(.system(size: 10.5).monospaced())
+                                    .foregroundStyle(Theme.ink)
+                                    .lineLimit(1).truncationMode(.head)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show in Finder")
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+                // The list is capped so a scan of `/` without Full Disk Access
+                // does not try to draw thousands of rows. Saying so is better
+                // than a list that silently stops.
+                if total > paths.count {
+                    Divider().overlay(Theme.hairline)
+                    Text("and \(total - paths.count) more")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                }
+            }
+            .frame(width: 380)
+        }
     }
 
     private func riskKey(_ level: StorageRisk) -> some View {

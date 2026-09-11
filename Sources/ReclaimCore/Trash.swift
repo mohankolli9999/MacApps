@@ -78,6 +78,67 @@ public enum StorageSafety {
     }
 }
 
+/// Everything picked for removal, from anywhere on the map.
+///
+/// Selection used to live and die with the folder on screen, so gathering from
+/// four places meant four separate deletes, each quoting its own number. Holding
+/// the picks instead makes them one act with one total — which is also the only
+/// way the cross-branch estimate can be exact, since two clones of each other
+/// free more together than either frees alone and it cannot see that if they
+/// never arrive in the same list.
+public struct Collector: Sendable, Equatable {
+    public private(set) var items: [StorageNode] = []
+
+    public init() {}
+
+    public var isEmpty: Bool { items.isEmpty }
+    public var count: Int { items.count }
+    public var ids: Set<String> { Set(items.map(\.id)) }
+    public var urls: [URL] { items.map(\.url) }
+    /// What the picks return counted one at a time, which is available the
+    /// instant something is picked. A floor, never the answer: `SelectionSpace`
+    /// walks the tray to find what they free together.
+    public var floorBytes: Int64 { items.reduce(0) { $0 + $1.reclaimableBytes } }
+    public var physicalBytes: Int64 { items.reduce(0) { $0 + $1.physicalBytes } }
+
+    /// The tray is what the Trash button acts on, so refusal belongs at the door.
+    /// Filtering on the way out would let something appear in the list, be
+    /// counted in the total, and then quietly not happen.
+    public static func admits(_ node: StorageNode) -> Bool {
+        StorageSafety.risk(for: node.url).isTrashable
+    }
+
+    public func contains(_ id: String) -> Bool { items.contains { $0.id == id } }
+
+    public mutating func add(_ node: StorageNode) {
+        guard Self.admits(node) else { return }
+        // A folder already carries its children's bytes. Holding both counts them
+        // twice, and trashing the parent first leaves the child pointing at a
+        // path the parent took with it.
+        guard !items.contains(where: { Self.encloses($0.id, node.id) }) else { return }
+        items.removeAll { Self.encloses(node.id, $0.id) }
+        items.append(node)
+    }
+
+    public mutating func remove(id: String) { items.removeAll { $0.id == id } }
+    public mutating func removeAll() { items.removeAll() }
+
+    @discardableResult
+    public mutating func toggle(_ node: StorageNode) -> Bool {
+        if contains(node.id) {
+            remove(id: node.id)
+            return false
+        }
+        add(node)
+        return contains(node.id)
+    }
+
+    /// The separator matters: `Downloads` does not enclose `Downloads-old`.
+    private static func encloses(_ ancestor: String, _ path: String) -> Bool {
+        path == ancestor || path.hasPrefix(ancestor + "/")
+    }
+}
+
 /// Whether the app can see the whole disk.
 ///
 /// macOS deliberately offers no API to query or request Full Disk Access — an

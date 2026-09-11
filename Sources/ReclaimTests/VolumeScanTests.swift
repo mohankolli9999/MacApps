@@ -250,6 +250,11 @@ private final class Collector: @unchecked Sendable {
 
         let result = try! VolumeScanner.scan(root, listThreshold: 0)
         t.equal(result.unreadableLocations, 1, "a directory that cannot be read is counted")
+        // A count tells someone bytes are missing and leaves them no way to find
+        // out which bytes. Naming the place is the difference between a caveat
+        // and something the user can act on.
+        t.equal(result.unreadablePaths, [root.appendingPathComponent("locked").path],
+                "and named, so the user can go and look at it")
     }
 
     // Clones and hard links are one allocation on disk. Counting them twice
@@ -457,6 +462,7 @@ private final class Collector: @unchecked Sendable {
     let result = try! VolumeScanner.scan(root, listThreshold: 0)
     t.equal(result.root.physicalBytes, 2 << 20, "bytes on another volume are not counted here")
     t.equal(result.offVolumeLocations, 1, "and the crossing is reported rather than dropped")
+    t.equal(result.offVolumePaths, [mountpoint.path], "by name, not just as a tally")
 
     let clean = try! VolumeScanner.scan(root, listThreshold: 0, skipping: [mountpoint.path])
     t.equal(clean.offVolumeLocations, 0,

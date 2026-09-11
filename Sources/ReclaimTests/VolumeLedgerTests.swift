@@ -257,3 +257,29 @@ private let snapshotFixture = """
     t.expect(verdict != .unknown,
              "the TCC directory exists on every Mac, so it always answers granted or denied")
 }
+
+@MainActor func runVolumeSpaceTests(_ t: Harness) {
+    t.section("Volume space")
+
+    // The window has to say something true before the first branch lands. A walk
+    // is a minute; this is a syscall, and an empty frame for that minute is the
+    // whole of what "the app is slow" describes.
+    do {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        guard let space = VolumeLedger.space(at: home) else {
+            t.expect(false, "the volume the home folder is on can be measured")
+            return
+        }
+        t.expect(space.capacity > 0, "a mounted volume has a size")
+        t.expect(space.free >= 0, "and a non-negative amount left")
+        t.expect(space.free <= space.capacity, "which cannot exceed the size")
+        t.equal(space.used, space.capacity - space.free, "used is what is not free")
+    }
+
+    do {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-volume-\(UUID().uuidString)")
+        t.expect(VolumeLedger.space(at: missing) == nil,
+                 "somewhere that is not there reports nothing rather than zero")
+    }
+}
