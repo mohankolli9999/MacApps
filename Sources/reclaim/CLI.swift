@@ -57,6 +57,48 @@ func printTable(_ artefacts: [Artefact]) {
     print("\nreclaimable: \(humanBytes(total))")
 }
 
+/// One wall-clock number for the walk the app runs, with no window in the way.
+///
+/// "The scan is slow" is unanswerable until the total is split, and this is the
+/// cheap half of the split: same `VolumeScanner`, same skip set, same 0.12s
+/// publish interval, so everything up to and including building each progress
+/// snapshot is counted — and nothing of the main-actor hop or the redraw is.
+/// Subtract this from the app's click-to-done and what is left is the window.
+///
+/// Ticks are counted rather than dropped, because a publish the app pays for is
+/// a publish this has to pay for too.
+func timeWalk(_ path: String) async {
+    let url = URL(fileURLWithPath: path)
+    let ticks = Counter()
+    let started = ContinuousClock.now
+    // The same place the app steps around: macOS firmlinks the data volume into
+    // `/`, so walking both arrives at the same bytes down two paths.
+    let result = try? await VolumeScanner.scanConcurrently(
+        url, skipping: ["/System/Volumes/Data"], onUpdate: { _ in ticks.bump() })
+    let elapsed = started.duration(to: .now)
+
+    guard let result else {
+        FileHandle.standardError.write(Data("reclaim: cannot walk \(path)\n".utf8))
+        exit(1)
+    }
+    let seconds = Double(elapsed.components.seconds)
+        + Double(elapsed.components.attoseconds) / 1e18
+    print(String(format: "%.2fs  %@  %@",
+                 seconds, humanBytes(result.root.reclaimableBytes).padded(to: 10), path))
+    print("  \(ticks.value) progress snapshots, "
+          + "\(result.unreadableLocations) unreadable, "
+          + "\(result.cloudOnlyLocations) cloud-only, "
+          + "\(result.offVolumeLocations) off-volume, "
+          + "\(result.firmlinkCrossings) firmlink crossings")
+}
+
+/// The scan publishes from several threads at once.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var value = 0
+    func bump() { lock.withLock { value += 1 } }
+}
+
 extension String {
     func padded(to width: Int) -> String {
         count >= width ? self : self + String(repeating: " ", count: width - count)
@@ -111,6 +153,9 @@ struct CLI {
             }
             print("\ntotal: \(humanBytes(freed))")
 
+        case "walk":
+            await timeWalk(paths.first ?? NSHomeDirectory())
+
         case "restore":
             guard let plans = try? RestoreEngine(manifest: store).history() else {
                 print("no manifest yet"); return
@@ -130,6 +175,7 @@ struct CLI {
               plan        measure and validate restore recipes
               reclaim     free space (dry run unless --confirm)
               restore     show restore commands for what was freed
+              walk        time a full volume walk (default: home)
             """)
         }
     }

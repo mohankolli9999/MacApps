@@ -14,6 +14,9 @@ enum Theme {
     /// Reserved for the one thing worth alarming about: a record that cannot
     /// bring anything back. Never used decoratively.
     static let warn = Color(hex: 0xE0A05A)
+    /// The other side of `warn`: space on offer rather than a risk being run.
+    /// Its own value so that an offer never has to borrow the alarm colour.
+    static let gain = Color(hex: 0x4FB08A)
 
     private static let ecosystem: [String: Color] = [
         "ollama.models": Color(hex: 0x6E7BE8),

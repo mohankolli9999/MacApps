@@ -9,6 +9,7 @@ private let ATTR_CMNEXT_CLONE_REFCNT: UInt32 = 0x0000_1000
 private let FSOPT_PACK_INVAL_ATTRS: UInt32 = 0x0000_0008
 private let FSOPT_ATTR_CMN_EXTENDED: UInt32 = 0x0000_0020
 private let EF_SHARES_ALL_BLOCKS: UInt64 = 0x0000_0040
+private let EF_MAY_SHARE_BLOCKS: UInt64 = 0x0000_0001
 private let VREG: UInt32 = 1
 private let VDIR: UInt32 = 2
 
@@ -84,6 +85,90 @@ public enum FileSpace {
                        IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
     }
 
+    /// How far a volume's own numbers can be taken at their word.
+    ///
+    /// A private size of zero has several causes and they do not share an answer,
+    /// so the ambiguity is resolved once per volume instead of guessed at per
+    /// file. Guessing per file is what this replaces, and it was wrong in the
+    /// direction that matters: it read the zero as "the kernel did not account
+    /// for these bytes, so credit the allocation", which is precisely backwards
+    /// when the bytes are unaccounted *because* something else is holding them.
+    public enum VolumeAccounting: Sendable, Equatable {
+        /// The volume clones files and nothing is pinning it, so the private size
+        /// is the literal answer and a resource fork the file owns outright can
+        /// be added to it.
+        case exact
+        /// Nothing on the volume can be deleted, so nothing on it is reclaimable
+        /// whatever its files report. The sealed system volume is the case that
+        /// matters: it is mounted from a snapshot, which zeroes every private
+        /// size on it, and that snapshot does not appear in the snapshot list —
+        /// so asking the mount whether it is writable is what makes this right
+        /// rather than an accident of which other rule happens to catch it.
+        case readOnly
+        /// A snapshot is holding this volume's blocks. Deleting a file the
+        /// snapshot contains frees nothing until it expires, and the kernel says
+        /// so by reporting no private bytes. Nothing may be added on top of that.
+        case pinned
+        /// The volume has no concept of sharing, so it answers these attributes
+        /// with zeroes that mean "not supported" rather than "no private bytes".
+        /// Allocated size is the only number it has, and it is the right one:
+        /// with no clones there is nothing to be wrong about.
+        case allocation
+    }
+
+    /// Decided per device, before walking, and read from every walking thread
+    /// without further synchronisation — the same discipline as the placeholder
+    /// policy above.
+    ///
+    /// Keyed by device because a scan covers external drives as well as the boot
+    /// volume, and neither a snapshot nor a missing capability on one says
+    /// anything about the other. An unrecorded device is treated as `exact`,
+    /// which under-reports on a volume that needed `allocation` and never
+    /// over-reports — the asymmetry that decides every default here, since an
+    /// under-report costs the user an opportunity and an over-report makes the
+    /// delete button lie.
+    public nonisolated(unsafe) static var volumeAccounting: [dev_t: VolumeAccounting] = [:]
+
+    /// The read-only and snapshot tests look interchangeable on this machine and
+    /// are not: `/System/Volumes/Update/mnt1` is sealed with every file at a
+    /// private size of zero, yet its mount flags have `MNT_RDONLY` clear, so only
+    /// the snapshot test catches it. Collapsing the two because they happen to
+    /// agree on `/` would put that volume back on `.exact` and promise every byte
+    /// of it.
+    ///
+    /// - Parameter snapshotted: whether a snapshot is holding the volume, which
+    ///   this cannot ask for itself without dragging `diskutil` into the hot path.
+    public static func record(volumeAt url: URL, snapshotted: Bool) {
+        guard let device = inspect(url.path)?.device else { return }
+        var mount = statfs()
+        let readOnly = statfs(url.path, &mount) == 0
+            && mount.f_flags & UInt32(MNT_RDONLY) != 0
+        volumeAccounting[device] = readOnly ? .readOnly
+            : snapshotted ? .pinned
+            : clonesFiles(at: url.path) ? .exact : .allocation
+    }
+
+    /// Whether the volume holding `path` can share blocks between files at all.
+    ///
+    /// Without this the zeroes an HFS+ or exFAT volume returns for the fork
+    /// attributes read as "this file frees nothing", and an entire external drive
+    /// reports as having nothing to reclaim.
+    public static func clonesFiles(at path: String) -> Bool {
+        var list = attrlist()
+        list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        list.volattr = attrgroup_t(ATTR_VOL_INFO) | attrgroup_t(ATTR_VOL_CAPABILITIES)
+        var answer = (length: UInt32(0), capabilities: vol_capabilities_attr_t())
+        guard getattrlist(path, &list, &answer, MemoryLayout.size(ofValue: answer), 0) == 0
+        else { return false }
+        // `.1` is `VOL_CAPABILITIES_INTERFACES`, which Swift imports as a tuple
+        // rather than an array. A capability only means anything when the volume
+        // also claims to know the question, hence both words.
+        let supported = answer.capabilities.valid.1
+        let present = answer.capabilities.capabilities.1
+        return supported & UInt32(VOL_CAP_INT_CLONE) != 0
+            && present & UInt32(VOL_CAP_INT_CLONE) != 0
+    }
+
     public struct Listing: Sendable, Equatable {
         public let name: String
         public let entry: Entry
@@ -95,9 +180,75 @@ public enum FileSpace {
     public enum ListingError: Error, Equatable {
         case denied
         case missing
+        /// The directory's contents live on a provider's server, and `forbid()`
+        /// has told the kernel this process will not fetch them. It cannot
+        /// answer without the round trip it is not allowed to make, and returns
+        /// a deadlock error rather than quietly downloading the user's drive.
+        case dataless
         case failed(Int32)
+
+        /// Where a directory that could not be listed belongs in the totals.
+        public enum Disposition: Sendable, Equatable {
+            /// Bytes the scan could not see, so every total above is low.
+            case unreadable
+            /// Not a failure. None of those bytes are on this disk, which is
+            /// the complete answer for a tool measuring what is reclaimable
+            /// here — filing it as unreadable would report the scan as blocked
+            /// when it knew.
+            case elsewhere
+            /// Gone between its parent listing it and this thread reaching it.
+            case vanished
+
+            /// Under a wide parallel walk a directory can be refused once and
+            /// handed over without complaint on the next ask, so a refusal is
+            /// worth confirming before it is believed. The other two are
+            /// settled: a dataless directory refuses identically every time —
+            /// measured elsewhere at 0 successes in 20 retries — and a vanished
+            /// one has nothing to come back to.
+            public var isWorthAskingAgain: Bool { self == .unreadable }
+        }
+
+        public var disposition: Disposition {
+            switch self {
+            case .dataless: .elsewhere
+            case .missing: .vanished
+            case .denied, .failed: .unreadable
+            }
+        }
+
+        public var isWorthAskingAgain: Bool { disposition.isWorthAskingAgain }
+
+        public static func of(_ code: Int32) -> ListingError {
+            switch code {
+            case EACCES, EPERM: .denied
+            case ENOENT: .missing
+            case EDEADLK: .dataless
+            default: .failed(code)
+            }
+        }
     }
 
+    /// `ATTR_CMNEXT_PRIVATESIZE` is by far the most expensive field here — the
+    /// other four are inode values the kernel already holds, while this one
+    /// makes it work out which of the file's blocks are shared. Measured on this
+    /// home folder it is about seventeen seconds of a forty-eight second scan,
+    /// and dropping it from the bulk read makes the scan 1.56x faster.
+    ///
+    /// It cannot be dropped, and the reason is worth keeping because the idea is
+    /// an obvious one to have twice. The plan was to leave it out here and re-read
+    /// only the files whose flags say they share blocks, on the theory that
+    /// everything else has a private size equal to its allocated size. Sharing is
+    /// not the only thing that separates those two numbers. Measured over 1.57M
+    /// files: 24 compressed files report a private size of zero because decmpfs
+    /// keeps their data in an extended attribute, 33 sparse and purgeable files
+    /// report less than they occupy, and — the one that ends the idea — two files
+    /// carrying *no flags at all* report zero against real allocation, because
+    /// their data is in a resource fork that the private size does not count and
+    /// nothing in the metadata advertises. Gating on every storage flag the
+    /// kernel does expose still leaked those two, still had to re-read a third of
+    /// all files, and left no way to know what else is unflagged. A scan that is
+    /// 1.56x faster and sometimes promises back bytes that will not arrive is not
+    /// the trade this app makes.
     private static func request() -> attrlist {
         var list = attrlist()
         list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
@@ -107,7 +258,9 @@ public enum FileSpace {
             | attrgroup_t(ATTR_CMN_FLAGS)
             | attrgroup_t(ATTR_CMN_FILEID)
         list.dirattr = attrgroup_t(ATTR_DIR_MOUNTSTATUS)
-        list.fileattr = attrgroup_t(ATTR_FILE_TOTALSIZE) | attrgroup_t(ATTR_FILE_ALLOCSIZE)
+        list.fileattr = attrgroup_t(ATTR_FILE_TOTALSIZE)
+            | attrgroup_t(ATTR_FILE_ALLOCSIZE)
+            | attrgroup_t(ATTR_FILE_RSRCALLOCSIZE)
         list.forkattr = attrgroup_t(ATTR_CMNEXT_PRIVATESIZE
             | ATTR_CMNEXT_REALDEVID
             | ATTR_CMNEXT_CLONEID
@@ -133,12 +286,30 @@ public enum FileSpace {
     /// nothing, so reading unconditionally takes the device id as the private
     /// size — sixteen megabytes for a sixty-four kilobyte file. Neither decoder
     /// is right for both. With the flag both reserve the space, both claim all
-    /// five present whether or not the filesystem has heard of them, and both
+    /// five reserved whether or not the filesystem has heard of them, and both
     /// zero-fill the rest: reading unconditionally is then correct everywhere,
     /// and the zeros are interpreted below rather than believed. It does *not*
     /// reserve space for attributes that do not apply to the object at hand,
     /// which is why a directory has no allocated size and that one field still
     /// has to be read from the mask.
+    ///
+    /// The fork region is laid out by the request, not by the reply, so the fork
+    /// mask must not be used the way the dirattr and fileattr masks are. What
+    /// makes reading it unconditionally correct is that the field list below is
+    /// exactly the set requested above — that equality is the invariant, not the
+    /// unconditionality. Add a bit to one without adding a step to the other and
+    /// the cursor breaks with no compiler error and no mask to catch it.
+    ///
+    /// Measured on a read-only HFS volume: `REALDEVID` comes back absent from
+    /// the mask — `0x1348` asked, `0x1308` returned — yet the record still
+    /// reserves all thirty-two bytes, and the name begins exactly where reading
+    /// all five puts the cursor. Skipping the four bytes the mask disowns lands
+    /// four short and reads `EXT_FLAGS`, which carries the sharing bits every
+    /// reclaim decision rests on, half out of the neighbouring field. The
+    /// reserved slot is actively zeroed rather than left as it was — checked
+    /// against a buffer poisoned with `0xAA` and `0xFF`, which matters because
+    /// this one is reused across batches — so `fallbackDevice` covers the
+    /// absent id instead of inheriting the last record's.
     ///
     /// - Parameter fallbackDevice: what to report when the filesystem does not
     ///   supply a real device id. Seen once on a freshly mounted HFS+ image,
@@ -177,6 +348,8 @@ public enum FileSpace {
             ? take(Int64.self) : 0
         let allocated = returned.fileattr & attrgroup_t(ATTR_FILE_ALLOCSIZE) != 0
             ? take(Int64.self) : 0
+        let resourceFork = returned.fileattr & attrgroup_t(ATTR_FILE_RSRCALLOCSIZE) != 0
+            ? take(Int64.self) : 0
         let privateBytes = take(Int64.self)
         let realDevice = take(Int32.self)
         let familyID = take(UInt64.self)
@@ -198,31 +371,72 @@ public enum FileSpace {
         default: kind = .other
         }
 
-        // A private size of zero means the blocks are not in ordinary file
-        // extents. That is true of a clone, but equally of a compressed file, of
-        // a placeholder that still holds blocks, and of every file on a volume
-        // that has no concept of sharing at all — where these attributes come
-        // back zeroed and trusting them would report an entire external drive as
-        // freeing nothing. Only the clone case means deleting frees nothing, and
-        // `EF_SHARES_ALL_BLOCKS` is what separates them. Testing the weaker
-        // `EF_MAY_SHARE_BLOCKS` instead would be wrong, because that bit is
-        // sticky: it survives the deletion of the last partner.
-        let sharesEverything = extendedFlags & EF_SHARES_ALL_BLOCKS != 0
-        let reclaimable = privateBytes == 0 && allocated > 0 && !sharesEverything
-            ? allocated
-            : privateBytes
+        let device = realDevice != 0 ? dev_t(realDevice) : fallbackDevice
+        let accounting = volumeAccounting[device] ?? .exact
 
+        // The private size measures the data fork alone, so a file holding bytes
+        // in a resource fork looks short by exactly that much — and a shortfall
+        // is otherwise read as sharing, which filed ordinary files under bytes
+        // nobody can account for. Only added when nothing about the file is
+        // shared: cloning copies the resource fork and goes on reporting its
+        // full allocated size on both copies, so crediting a sharer would
+        // promise the same blocks twice. `EF_MAY_SHARE_BLOCKS` is included in
+        // that test even though it is sticky and survives the deletion of the
+        // last partner, because the cost of believing it is an under-report.
+        //
+        // A compressed file keeps its data outside the ordinary file extents, so
+        // it reports no private bytes against real allocation and reads exactly
+        // like a file a snapshot is holding. The allocated size is the right
+        // answer for the first and catastrophically wrong for the second, and no
+        // per-file attribute tells them apart — which is why this substitution
+        // is confined to `exact`. That mode means no snapshot on this volume, so
+        // the pinned cause is excluded by construction rather than by guesswork.
+        // It is still worth having: of 2,967 compressed files under
+        // /Applications, 1,541 carry no sharing bits and account for 213.9 MiB,
+        // and the compressed file is typically the largest binary in an app
+        // bundle, so dropping it tells the user that deleting a 24.8 MB
+        // executable would free nothing. The other 1,426 ship pre-cloned by
+        // their installer, which is why the sharing test cannot be skipped on
+        // the grounds that compression implies a private payload.
+        let sharesEverything = extendedFlags & EF_SHARES_ALL_BLOCKS != 0
+        let sharesNothing = extendedFlags & (EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS) == 0
+        let compressed = flags & UInt32(UF_COMPRESSED) != 0
+        let reclaimable: Int64
+        switch accounting {
+        case .readOnly: reclaimable = 0
+        case .allocation: reclaimable = allocated
+        case .pinned: reclaimable = privateBytes
+        case .exact:
+            // Allocated size already covers both forks, so the compressed branch
+            // must not also add the resource fork — decmpfs stores the larger
+            // payloads there, and it would be counted twice.
+            reclaimable = privateBytes == 0 && compressed && !sharesEverything
+                ? allocated
+                : privateBytes + (sharesNothing ? resourceFork : 0)
+        }
+
+        // A pinned volume never reports a clone family, however plainly the file
+        // says it is in one. A family whose members are all selected is credited
+        // its shared blocks back on the grounds that deleting the last of them
+        // releases the blocks — which the snapshot then goes on holding. Filing
+        // them as unaccountable instead deducts those bytes rather than promising
+        // them, which is the whole of what can honestly be said here.
+        //
+        // A read-only volume reports nothing shared either. Its files are not
+        // unaccounted for, they are simply not deletable, and filing the sealed
+        // system volume under "bytes nobody can explain" would be a scan-wide
+        // warning about a disk behaving exactly as designed.
         let sharing: Sharing
-        if kind != .file || reclaimable >= allocated {
+        if kind != .file || reclaimable >= allocated || accounting == .readOnly {
             sharing = .none
-        } else if sharesEverything {
+        } else if sharesEverything, accounting != .pinned {
             sharing = .whole(familySize: Int(max(referenceCount, 1)), familyID: familyID)
         } else {
             sharing = .partial
         }
 
         let entry = Entry(kind: kind,
-                          device: realDevice != 0 ? dev_t(realDevice) : fallbackDevice,
+                          device: device,
                           inode: ino_t(fileID),
                           isCloudPlaceholder: flags & UInt32(SF_DATALESS) != 0,
                           isMountPoint: mountStatus & UInt32(DIR_MNTSTATUS_MNTPOINT) != 0,
@@ -266,13 +480,7 @@ public enum FileSpace {
     /// thread at once.
     public static func stream(_ path: String, _ body: (Listing) -> Bool) throws {
         let directory = open(path, O_RDONLY | O_DIRECTORY)
-        guard directory >= 0 else {
-            switch errno {
-            case EACCES, EPERM: throw ListingError.denied
-            case ENOENT: throw ListingError.missing
-            default: throw ListingError.failed(errno)
-            }
-        }
+        guard directory >= 0 else { throw ListingError.of(errno) }
         defer { close(directory) }
 
         var info = stat()
@@ -285,7 +493,11 @@ public enum FileSpace {
                 getattrlistbulk(directory, &list, $0.baseAddress, $0.count, UInt64(options))
             }
             guard count > 0 else {
-                guard count == 0 else { throw ListingError.failed(errno) }
+                // Classified the same way as the open, because this is where a
+                // dataless directory actually fails: opening one succeeds, and
+                // the kernel only discovers it needs the provider when it is
+                // asked for the contents.
+                guard count == 0 else { throw ListingError.of(errno) }
                 return
             }
             var offset = 0

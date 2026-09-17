@@ -205,6 +205,32 @@ private let snapshotFixture = """
     }
     t.expect(VolumeLedger.purgeableBytes(at: URL(fileURLWithPath: "/definitely/not/mounted")) == nil,
              "an unmounted path reports nothing rather than zero")
+
+    t.section("Volume ledger — space read twice")
+
+    // Anything showing free space as it moves holds one URL for the life of the
+    // window, and `URL` caches resource values behind its struct facade: the
+    // cache lives on the reference-typed backing, so it survives being passed by
+    // value and a second read returns the first answer byte for byte. Measured
+    // on this volume, 384 MB landed and the same URL went on reporting the free
+    // space from before it. A figure that cannot change is worse than no figure
+    // — it is a stale number wearing a live one's clothes.
+    let volume = URL(fileURLWithPath: NSHomeDirectory())
+    if let before = VolumeLedger.space(at: volume) {
+        // Same volume as home: everything under /var/folders is on the data
+        // volume, so bytes written here move the figure read at ~.
+        let ballast = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diskreclaim-space-probe")
+        try? Data(count: 8 << 20).write(to: ballast)
+        let after = VolumeLedger.space(at: volume)
+        try? FileManager.default.removeItem(at: ballast)
+
+        t.expect((after?.free ?? before.free) < before.free,
+                 "reading the same URL twice sees bytes that landed in between")
+        t.equal(after?.capacity ?? 0, before.capacity, "and the volume is still the size it was")
+    } else {
+        t.expect(false, "the home volume reports its space")
+    }
 }
 
 @MainActor func runByteFormatTests(_ t: Harness) {
@@ -281,5 +307,52 @@ private let snapshotFixture = """
             .appendingPathComponent("no-volume-\(UUID().uuidString)")
         t.expect(VolumeLedger.space(at: missing) == nil,
                  "somewhere that is not there reports nothing rather than zero")
+    }
+
+    // A snapshot pins every block the volume held when it was taken, so until it
+    // expires deleting a file frees nothing — and the kernel says so, reporting a
+    // private size of zero for every file older than it. That is the honest
+    // answer, but unexplained it reads as a broken scan, so the app has to know
+    // which volume is under one.
+    //
+    // Which volume, exactly. `tmutil` answers by volume *group*, so it reports
+    // the near-universal system-update snapshot against the data volume too and
+    // would fire this warning on almost every Mac.
+    t.section("Snapshot detection")
+
+    do {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        guard let device = VolumeLedger.device(at: home) else {
+            t.expect(false, "the home folder's volume can be named")
+            return
+        }
+        t.expect(VolumeLedger.isDeviceIdentifier(device),
+                 "and is named in the form diskutil accepts (\(device))")
+
+        // The home folder is firmlinked in from the data volume, so the device
+        // under it is not the device mounted at `/`. Asking about the wrong one
+        // is how the system-update snapshot gets mistaken for a live backup.
+        let system = VolumeLedger.device(at: URL(fileURLWithPath: "/"))
+        t.expect(system != device,
+                 "the data volume is not the volume mounted at / (\(system ?? "nil"))")
+    }
+
+    do {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("no-volume-\(UUID().uuidString)")
+        t.expect(VolumeLedger.device(at: missing) == nil,
+                 "a path that is not there names no volume")
+    }
+
+    // Purgeability is about whether macOS will drop it on its own under pressure.
+    // It has no bearing on this: the snapshot measured during development was
+    // purgeable and still drove every pre-existing file's private size to zero
+    // while it existed. So the warning counts snapshots, not durable ones.
+    do {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        let pinning = VolumeLedger.snapshotsPinning(home)
+        let all = (try? VolumeLedger.snapshots(of: VolumeLedger.device(at: home) ?? "")) ?? []
+        t.equal(pinning.count, all.count,
+                "a purgeable snapshot pins blocks exactly as a durable one does")
     }
 }

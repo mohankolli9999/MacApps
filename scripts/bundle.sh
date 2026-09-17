@@ -18,17 +18,17 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/DiskReclaim"
 
-# SwiftPM's generated Bundle.module looks in Bundle.main.bundleURL, which for an
-# app is the .app itself and NOT Contents/Resources. Its only fallback is an
-# absolute path into this machine's .build, so getting this wrong ships an app
-# that works here and fatalErrors on launch anywhere else.
+# Contents/Resources and not the app root. codesign seals Contents/ and nothing
+# beside it, so a resource bundle in the root makes the app unsignable — which
+# is what it did until `Catalogue.bundledURL` stopped using SwiftPM's generated
+# accessor, whose only search path is that root.
 shopt -s nullglob
 BUNDLES=("$ROOT/.build/$CONFIG"/*.bundle)
 if [ ${#BUNDLES[@]} -eq 0 ]; then
     echo "no resource bundles in .build/$CONFIG — the catalogue would be missing" >&2
     exit 1
 fi
-cp -R "${BUNDLES[@]}" "$APP/"
+cp -R "${BUNDLES[@]}" "$APP/Contents/Resources/"
 
 # Committed artwork, regenerated from vector source by `swift run IconGen`.
 if [ -f "$ROOT/Resources/DiskReclaim.icns" ]; then
@@ -37,7 +37,35 @@ else
     echo "warning: no Resources/DiskReclaim.icns — run 'swift run IconGen'" >&2
 fi
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# Which build this is. The app has no telemetry, no crash reporting and no
+# update ping by design, so the identifier it carries is the only thing joining
+# a user's report to a commit — there is no second channel to fall back on.
+#
+# Derived rather than maintained, because a number someone has to remember to
+# bump is a number that sits at 1 through fifteen commits, which is what this
+# replaces. CFBundleVersion accepts only digits and periods, so the count goes
+# there and the SHA cannot; the SHA rides in Credits.html, which AppKit's
+# standard About panel renders with no code in the app at all.
+if BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null)"; then
+    COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
+    if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+        COMMIT="$COMMIT plus uncommitted changes"
+    fi
+    SOURCE="Build $BUILD, from commit $COMMIT."
+else
+    # An archive rather than a clone. Naming that is more use than a zero that
+    # reads like a real build number to whoever is trying to reproduce a report.
+    BUILD=0
+    SOURCE="Built from a source copy carrying no history, so this build cannot be identified by commit."
+fi
+
+cat > "$APP/Contents/Resources/Credits.html" <<HTML
+<html><body style="font-family:-apple-system;font-size:11px;color:#444">
+<p>$SOURCE</p>
+</body></html>
+HTML
+
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -48,8 +76,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>dev.macapps.diskreclaim</string>
     <key>CFBundleIconFile</key><string>DiskReclaim</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>$BUILD</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -58,6 +86,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # Ad-hoc signature: unsigned bundles get killed on arm64.
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+#
+# Fatal rather than swallowed. A silent `|| true` here hid a failing signature
+# for the whole life of the script — the app launched anyway, because the linker
+# ad-hoc-signs the executable regardless, so nothing ever pointed at the bundle
+# having no seal at all.
+codesign --force --sign - "$APP"
+codesign --verify --strict "$APP"
 
 echo "$APP"

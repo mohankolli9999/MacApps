@@ -32,6 +32,64 @@ func clone(_ source: URL, to destination: URL) {
     precondition(rc == 0, "clonefile failed: \(errno)")
 }
 
+/// A compressed file that SIP does not protect, on a writable volume.
+///
+/// Discovered rather than named. There is no API for compressing a file, so the
+/// fixture has to be something already on the disk, and which of those exist
+/// varies by machine. Naming one also conflates mechanisms: the obvious
+/// candidate is a system binary, and those are compressed *and* SIP-restricted
+/// *and* on a read-only snapshot mount, so a test pinned to one passes or fails
+/// for three reasons at once.
+func findCompressedFile() -> String? {
+    let fm = FileManager.default
+    for app in (try? fm.contentsOfDirectory(atPath: "/Applications")) ?? [] {
+        for sub in ["Contents/MacOS", "Contents/Frameworks", "Contents/Resources"] {
+            let directory = "/Applications/\(app)/\(sub)"
+            for name in (try? fm.contentsOfDirectory(atPath: directory)) ?? [] {
+                let path = "\(directory)/\(name)"
+                var info = stat()
+                guard lstat(path, &info) == 0,
+                      info.st_flags & UInt32(UF_COMPRESSED) != 0,
+                      info.st_flags & UInt32(SF_RESTRICTED) == 0,
+                      sharesAllBlocks(path) == false,
+                      let entry = FileSpace.inspect(path),
+                      entry.allocatedBytes > 0
+                else { continue }
+                return path
+            }
+        }
+    }
+    return nil
+}
+
+/// `EF_SHARES_ALL_BLOCKS`, read straight from the kernel rather than inferred
+/// from what `FileSpace` reports.
+///
+/// Installers ship a good many application binaries pre-cloned, and one of those
+/// is the wrong fixture for the substitution above — it correctly frees nothing.
+/// Selecting on `Entry.sharing` would be circular, since a file the substitution
+/// wrongly fired on reports `.none` and would be picked precisely when the test
+/// most needed to fail.
+func sharesAllBlocks(_ path: String) -> Bool {
+    var list = attrlist()
+    list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+    list.commonattr = ATTR_CMN_RETURNED_ATTRS
+    list.forkattr = attrgroup_t(0x0000_0200)
+    var answer = (length: UInt32(0), returned: attribute_set_t(), flags: UInt64(0))
+    let options = UInt32(FSOPT_NOFOLLOW) | 0x0000_0020 | 0x0000_0008
+    guard getattrlist(path, &list, &answer, MemoryLayout.size(ofValue: answer), options) == 0
+    else { return false }
+    return answer.flags & 0x0000_0040 != 0
+}
+
+/// A resource fork is a second stream of bytes hanging off the same file, and
+/// the only way to make one without a legacy API is to write to its magic path.
+func writeResourceFork(_ bytes: Int, to url: URL) {
+    var data = Data(count: bytes)
+    data.withUnsafeMutableBytes { arc4random_buf($0.baseAddress!, $0.count) }
+    try! data.write(to: url.appendingPathComponent("..namedfork/rsrc"))
+}
+
 /// Rewrites part of a clone in place, which is how a *partial* sharer comes
 /// about: APFS un-shares the touched blocks, drops the file out of its clone
 /// family, and stops counting it in the family's reference count — while it goes
@@ -152,16 +210,185 @@ func overwrite(_ url: URL, atOffset offset: Int, bytes: Int) {
         t.equal(FileSpace.inspect(file.path)?.inode, s.st_ino, "the inode matches lstat")
     }
 
-    // Compressed files report no private bytes while holding real ones. Trusting
-    // that zero would hide every system binary from the total.
+    // A compressed file keeps its data outside the ordinary file extents, so it
+    // reports real allocation against no private bytes and looks exactly like a
+    // file a snapshot is holding. The allocated size is substituted for it, but
+    // only in `exact` mode, which is what makes the two distinguishable: `exact`
+    // means no snapshot on this volume, so the reading cannot have that cause.
+    //
+    // Worth the branch rather than under-reporting, because app bundles are
+    // heavily compressed and the compressed file is usually the biggest binary
+    // in the bundle. Measured over /Applications: 2,137 compressed files with no
+    // sharing bits, 193 MiB, including a 24.8 MB main binary that would
+    // otherwise tell the user deleting it frees nothing.
+    //
+    // The clone case is guarded by `sharesEverything` and cannot be covered here
+    // without cloning one of the user's application binaries, which changes that
+    // file's flags for as long as the copy exists. Measured by hand instead:
+    // a compressed file at `ext 0x0` becomes `0x41` on both copies the moment it
+    // is cloned, and drops back to the sticky `0x1` when the copy is deleted. So
+    // the guard sees the clone, and the substitution does not double-promise.
+    if let path = findCompressedFile() {
+        defer { FileSpace.volumeAccounting = [:] }
+        let e = FileSpace.inspect(path)!
+        let device = e.device
+        t.equal(e.reclaimableBytes, e.allocatedBytes,
+                "a compressed file frees what it occupies")
+
+        FileSpace.volumeAccounting[device] = .pinned
+        if let pinned = FileSpace.inspect(path) {
+            t.equal(pinned.reclaimableBytes, 0,
+                    "and the substitution does not escape into a pinned volume")
+        }
+    }
+
+    // The sealed system volume, which is the case the compressed test above used
+    // to stand in for and should not have. Nothing here can be deleted at all,
+    // so the honest reclaimable figure is zero regardless of what any file says
+    // — and it is reached by asking the mount, not by reading the files. The
+    // volume is also snapshot-mounted (`/dev/disk3s1s1`, where the second `s`
+    // marks a snapshot) which zeroes every private size on it, but that snapshot
+    // is not in the snapshot list, so detection would miss it. Read-only is what
+    // makes this right rather than lucky.
     do {
+        defer { FileSpace.volumeAccounting = [:] }
+        let root = URL(fileURLWithPath: "/")
+        FileSpace.record(volumeAt: root, snapshotted: false)
         let e = FileSpace.inspect("/bin/ls")
         t.expect(e != nil, "a system binary can be measured")
         if let e {
             t.expect(e.allocatedBytes > 0, "/bin/ls occupies blocks")
-            t.equal(e.reclaimableBytes, e.allocatedBytes,
-                    "a compressed file is not mistaken for a clone")
+            t.equal(e.reclaimableBytes, 0, "and nothing on a read-only volume is reclaimable")
+            t.equal(e.sharing, .none,
+                    "which is not the same as its bytes being unaccounted for")
         }
+    }
+
+    // A file can hold bytes in a second stream, and the private size does not
+    // count them — it measures the data fork alone. Nothing in the flags says
+    // so: a file whose bytes are all in its resource fork carries no common
+    // flags and no extended flags, and reads exactly like an ordinary file
+    // whose blocks are shared. `ATTR_FILE_RSRCALLOCSIZE` is what tells them
+    // apart, and it is why "the file has no sharing bits, so its allocated size
+    // is its private size" is false.
+    do {
+        let root = makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Custom folder icons are the common case and the benign one: the data
+        // fork is empty, so the private size is zero and the file falls into
+        // the same branch as a compressed one, which happens to be right.
+        let icon = root.appendingPathComponent("icon.bin")
+        FileManager.default.createFile(atPath: icon.path, contents: nil)
+        writeResourceFork(600 << 10, to: icon)
+        if let e = FileSpace.inspect(icon.path) {
+            t.equal(e.reclaimableBytes, e.allocatedBytes,
+                    "a file that is nothing but a resource fork frees what it occupies")
+            t.equal(e.sharing, .none, "and is not reported as sharing anything")
+        }
+
+        // Both forks populated is the case that was wrong: the private size is
+        // the data fork, so the resource fork went uncounted and the shortfall
+        // was read as evidence of sharing.
+        let both = root.appendingPathComponent("both.bin")
+        writeFile(800 << 10, to: both)
+        writeResourceFork(300 << 10, to: both)
+        if let e = FileSpace.inspect(both.path) {
+            t.equal(e.reclaimableBytes, e.allocatedBytes,
+                    "both forks are counted, because deleting the file frees both")
+            t.equal(e.sharing, .none,
+                    "a resource fork is not mistaken for unaccountable sharing")
+        }
+
+        // The guard rail on the fix. Cloning copies the resource fork too, and
+        // its allocated size still reads full on both copies — so adding it
+        // unconditionally would promise the same bytes twice.
+        let clonedBoth = root.appendingPathComponent("both-clone.bin")
+        clone(both, to: clonedBoth)
+        if let e = FileSpace.inspect(clonedBoth.path) {
+            t.equal(e.reclaimableBytes, 0,
+                    "a cloned file frees nothing, resource fork included")
+        }
+    }
+
+    // While a snapshot holds a volume's blocks, deleting a file older than it
+    // frees nothing, and the kernel says so by reporting a private size of zero.
+    // Measured on this machine: a 300 MB tree deleted under a snapshot returned
+    // no free space at all, and the space only came back when the snapshot went.
+    // Every rule that credits bytes the private size did not account for is
+    // therefore wrong on such a volume — the unaccounted bytes are unaccounted
+    // *because* they are pinned. A real snapshot cannot be taken from a test, so
+    // the volume fact is injected and the rules are checked against it.
+    do {
+        let root = makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let device = FileSpace.inspect(root.path)!.device
+        defer { FileSpace.volumeAccounting = [:] }
+
+        let icon = root.appendingPathComponent("pinned-icon.bin")
+        FileManager.default.createFile(atPath: icon.path, contents: nil)
+        writeResourceFork(600 << 10, to: icon)
+        let fresh = root.appendingPathComponent("pinned-plain.bin")
+        writeFile(400 << 10, to: fresh)
+        // Its own file to clone: cloning zeroes the private size of the original
+        // as well as the copy, which would make `fresh` prove the wrong thing.
+        let source = root.appendingPathComponent("pinned-source.bin")
+        writeFile(400 << 10, to: source)
+        let cloned = root.appendingPathComponent("pinned-clone.bin")
+        clone(source, to: cloned)
+
+        FileSpace.volumeAccounting[device] = .pinned
+        if let e = FileSpace.inspect(icon.path) {
+            t.equal(e.reclaimableBytes, 0,
+                    "under a snapshot no byte is credited past the private size")
+        }
+        // The other half of the rule, and the reason it is not "report zero for
+        // the whole volume": a file written after the snapshot was taken is not
+        // in it, reports its full private size, and really would free that much.
+        if let e = FileSpace.inspect(fresh.path) {
+            t.equal(e.reclaimableBytes, e.allocatedBytes,
+                    "a file the snapshot does not hold still frees what it occupies")
+        }
+        // Selecting every member of a clone family normally earns its shared
+        // blocks back. Under a snapshot it must not, so the family is withheld.
+        if let e = FileSpace.inspect(cloned.path) {
+            t.equal(e.sharing, .partial,
+                    "a pinned clone is unaccountable rather than a closable family")
+        }
+
+        FileSpace.volumeAccounting = [:]
+        if let e = FileSpace.inspect(icon.path) {
+            t.equal(e.reclaimableBytes, e.allocatedBytes,
+                    "and the credit returns once no snapshot holds the volume")
+        }
+    }
+
+    // A volume that cannot clone answers the fork attributes with zeroes meaning
+    // "never heard of it". Believing them reports an external drive as holding
+    // nothing worth deleting, so allocated size is used instead — safe precisely
+    // because a volume with no clones has no shared blocks to over-promise.
+    do {
+        let root = makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let device = FileSpace.inspect(root.path)!.device
+        defer { FileSpace.volumeAccounting = [:] }
+
+        let file = root.appendingPathComponent("plain.bin")
+        writeFile(700 << 10, to: file)
+        let copy = root.appendingPathComponent("plain-clone.bin")
+        clone(file, to: copy)
+
+        FileSpace.volumeAccounting[device] = .allocation
+        if let e = FileSpace.inspect(copy.path) {
+            t.equal(e.reclaimableBytes, e.allocatedBytes,
+                    "a volume with no clone support is read by what files occupy")
+            t.equal(e.sharing, .none, "and nothing on it is reported as shared")
+        }
+
+        t.expect(FileSpace.clonesFiles(at: root.path),
+                 "the volume this test runs on does clone, so the mode is chosen not guessed")
+        t.expect(!FileSpace.clonesFiles(at: root.appendingPathComponent("gone").path),
+                 "a path that is not there claims no capability")
     }
 
     // macOS firmlinks the Data volume into `/`, so `st_dev` is the same on both
@@ -178,16 +405,32 @@ func overwrite(_ url: URL, atOffset offset: Int, bytes: Int) {
     // batch for directories it lists, the single read for a root it is handed.
     // If the two ever disagreed about the same file the totals would depend on
     // how the file was reached.
+    //
+    // Worth knowing what this test cannot catch, because it was trusted for
+    // that once. Both calls request the same attributes, so parity here only
+    // proves the two decoders agree — it says nothing about whether the number
+    // they agree on is right. An attempt to make the batch read cheaper by
+    // dropping the private size passed this fixture cleanly and still
+    // over-reported a real home folder by tens of megabytes. Sizing is checked
+    // against known-size fixtures above; parity is checked here; neither
+    // substitutes for the other.
     do {
         let root = makeTree()
         defer { try? FileManager.default.removeItem(at: root) }
-        writeFile(4 << 20, to: root.appendingPathComponent("solo.bin"))
+        let solo = root.appendingPathComponent("solo.bin")
+        writeFile(4 << 20, to: solo)
         let a = root.appendingPathComponent("a.bin")
         writeFile(4 << 20, to: a)
         clone(a, to: root.appendingPathComponent("b.bin"))
         let edited = root.appendingPathComponent("edited.bin")
         clone(a, to: edited)
         overwrite(edited, atOffset: 1 << 20, bytes: 1 << 20)
+        // One inode, two names. Hard links share the inode, not the blocks, so
+        // each name reports the file's full private size — which is why the
+        // scanner needs no link count to size one. Not double-counting it is a
+        // separate problem, solved by the inode ledger rather than here.
+        try! FileManager.default.linkItem(at: solo,
+                                          to: root.appendingPathComponent("hardlink.bin"))
         try! FileManager.default.createDirectory(at: root.appendingPathComponent("sub"),
                                                  withIntermediateDirectories: false)
         try! FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link"),
@@ -195,7 +438,7 @@ func overwrite(_ url: URL, atOffset offset: Int, bytes: Int) {
 
         let listed = (try? FileSpace.contents(of: root.path)) ?? []
         t.equal(listed.map(\.name).sorted(),
-                ["a.bin", "b.bin", "edited.bin", "link", "solo.bin", "sub"],
+                ["a.bin", "b.bin", "edited.bin", "hardlink.bin", "link", "solo.bin", "sub"],
                 "a batch read returns every entry, named")
 
         var disagreements: [String] = []
@@ -264,6 +507,36 @@ func overwrite(_ url: URL, atOffset offset: Int, bytes: Int) {
             t.equal(error as? FileSpace.ListingError, .missing,
                     "and absence is not mistaken for refusal")
         }
+
+        t.equal(FileSpace.ListingError.of(EACCES), .denied, "EACCES is a refusal")
+        t.equal(FileSpace.ListingError.of(EPERM), .denied, "so is EPERM")
+        t.equal(FileSpace.ListingError.of(ENOENT), .missing, "ENOENT is absence")
+        t.equal(FileSpace.ListingError.of(EIO), .failed(EIO), "anything else keeps its number")
+        // A cloud provider's directory whose contents are on a server. The
+        // process has forbidden materialising them, so the kernel cannot answer
+        // without a round trip it is not allowed to make and says so with a
+        // deadlock error. Reading that as a refusal reports the scan as blocked
+        // when it in fact knew the answer: none of those bytes are on this disk.
+        t.equal(FileSpace.ListingError.of(EDEADLK), .dataless,
+                "a listing that would need the provider is not a refusal")
+
+        t.equal(FileSpace.ListingError.denied.disposition, .unreadable,
+                "a refused directory is bytes the scan could not see")
+        t.equal(FileSpace.ListingError.failed(EIO).disposition, .unreadable,
+                "and so is an unexplained failure")
+        t.equal(FileSpace.ListingError.dataless.disposition, .elsewhere,
+                "a dataless directory holds nothing here, which is an answer")
+        t.equal(FileSpace.ListingError.missing.disposition, .vanished,
+                "and one that went away has nothing to report")
+
+        t.expect(FileSpace.ListingError.denied.isWorthAskingAgain,
+                 "a refusal under load is worth one more ask")
+        t.expect(FileSpace.ListingError.failed(EIO).isWorthAskingAgain,
+                 "so is a failure with no better explanation")
+        t.expect(!FileSpace.ListingError.dataless.isWorthAskingAgain,
+                 "asking twice cannot move bytes that are on a server")
+        t.expect(!FileSpace.ListingError.missing.isWorthAskingAgain,
+                 "nor bring back a directory that is gone")
     }
 }
 

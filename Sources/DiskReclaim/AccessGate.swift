@@ -18,10 +18,21 @@ struct AccessGate: View {
     /// Claiming the permission is missing when the probe only failed to find
     /// anything to test is how an app sends someone into Settings to grant what
     /// they granted last week.
+    ///
+    /// The denial names a repair and not a cause, which is the part worth
+    /// keeping. This build is ad-hoc signed, so its designated requirement is a
+    /// hash of the binary — measured, `cdhash H"..."` — and a changed app no
+    /// longer satisfies the requirement an existing grant was keyed to. What the
+    /// Privacy pane displays once that happens is *not* measured, and cannot be
+    /// from inside the app, because reading TCC needs the access it describes.
+    /// So the copy must not tell the user what they will find there. Removing
+    /// and re-adding repairs a stale entry, a switched-off one and a missing one
+    /// alike, which makes it the one instruction that stays true without knowing
+    /// which of them this is.
     private var detail: String {
         switch access {
         case .granted: "The whole disk is visible, so the totals will be complete."
-        case .denied: "Without it, parts of your Library and other users' folders stay hidden and the totals read low."
+        case .denied: "Without it, parts of your Library and other users' folders stay hidden and the totals read low. If Disk Reclaim is already listed there, remove it and add it again."
         case .unknown: "This Mac gave no answer either way. If it turns out to be missing, parts of your Library stay hidden and the totals read low."
         }
     }

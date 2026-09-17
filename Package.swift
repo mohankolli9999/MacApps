@@ -10,6 +10,5 @@ let package = Package(
         .executableTarget(name: "DiskReclaim", dependencies: ["ReclaimCore"]),
         .executableTarget(name: "ReclaimTests", dependencies: ["ReclaimCore"]),
         .executableTarget(name: "IconGen"),
-        .executableTarget(name: "LicenseTool", dependencies: ["ReclaimCore"]),
     ]
 )

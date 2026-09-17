@@ -12,20 +12,38 @@ struct ContentView: View {
     @State private var model = ScanModel()
     @State private var storage = StorageModel()
     @State private var systemStorage = SystemStorageModel()
-    @State private var licence = LicenseModel()
     @State private var paused = true
     @State private var reviewing = false
-    @State private var showingLicence = false
     @State private var chosen: Set<String> = []
     @State private var mode: Mode = .storage
-    @State private var gated = !UserDefaults.standard.bool(forKey: "hasSeenAccessGate")
-    @State private var access = FullDiskAccess.access
+    @State private var gated: Bool
+    @State private var access: FullDiskAccess.Access
+    @State private var explainingOffline = false
+
+    private static let seenKey = "hasSeenAccessGate"
+
+    init() {
+        let access = FullDiskAccess.access
+        _access = State(initialValue: access)
+        // Every launch's start, not once in the app's lifetime. A permission
+        // granted and later revoked leaves the app measuring a fraction of the
+        // disk, and going quiet about that to avoid nagging trades a nag for a
+        // number that is wrong and looks right — the one thing a disk tool
+        // cannot do. It still never recurs within a session and never sits over
+        // the map, so the ask happens at the start and only there.
+        //
+        // Only on a refusal. `.unknown` is the probe admitting it found nothing
+        // to test, and sending someone to grant a permission they already hold
+        // is worse than saying nothing.
+        _gated = State(initialValue: access == .denied
+                       || !UserDefaults.standard.bool(forKey: Self.seenKey))
+    }
 
     var body: some View {
         Group {
             if gated {
                 AccessGate(access: access) {
-                    UserDefaults.standard.set(true, forKey: "hasSeenAccessGate")
+                    UserDefaults.standard.set(true, forKey: Self.seenKey)
                     gated = false
                     storage.scan()
                 }
@@ -35,9 +53,13 @@ struct ContentView: View {
         }
         .background(Theme.stage)
         .frame(minWidth: 880, minHeight: 580)
-        // Granting the permission restarts nothing and notifies nobody, so the
-        // only way to notice is to keep asking. Cheap: three directory reads.
-        .task {
+        // Granting the permission restarts nothing and notifies nobody, so
+        // while the gate is up the only way to notice the answer is to keep
+        // asking. Once it is down the app stops watching: the permission is
+        // asked for at the start and nowhere else, and past that point what the
+        // scan was actually refused is better evidence than the probe anyway.
+        .task(id: gated) {
+            guard gated else { return }
             while !Task.isCancelled {
                 access = FullDiskAccess.access
                 try? await Task.sleep(for: .seconds(1.5))
@@ -53,9 +75,7 @@ struct ContentView: View {
             case .storage:
                 StorageView(model: storage,
                             access: access,
-                            licence: licence,
-                            onRequestAccess: { NSWorkspace.shared.open(FullDiskAccess.settingsURL) },
-                            onOpenLicence: { showingLicence = true })
+                            onRequestAccess: { NSWorkspace.shared.open(FullDiskAccess.settingsURL) })
             case .system:
                 SystemView(model: systemStorage)
             case .caches:
@@ -85,9 +105,6 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $reviewing) { review }
-        .sheet(isPresented: $showingLicence) {
-            LicenseSheet(model: licence) { showingLicence = false }
-        }
     }
 
     /// Two treemaps rather than one. A single pool is proportionally honest and
@@ -159,6 +176,10 @@ struct ContentView: View {
     }
 
     private func refresh() {
+        // The only read of the permission after the gate closes. Someone who
+        // granted it in the meantime gets an accurate empty-folder message on
+        // the next scan without the app polling for it all afternoon.
+        access = FullDiskAccess.access
         switch mode {
         case .storage: storage.scan()
         case .system: systemStorage.read()
@@ -172,6 +193,8 @@ struct ContentView: View {
             Text("Disk Reclaim")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Theme.ink)
+
+            offlineMark
 
             Picker("", selection: $mode) {
                 ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -189,8 +212,6 @@ struct ContentView: View {
             }
 
             Spacer()
-
-            LicenseBadge(model: licence) { showingLicence = true }
 
             VStack(alignment: .trailing, spacing: -1) {
                 Text(humanBytes(model.freeBytes))
@@ -215,6 +236,75 @@ struct ContentView: View {
         .padding(.vertical, 11)
     }
 
+    /// The promise is made on the access screen, which the user sees once and
+    /// then never again. An app that asks for the whole disk and afterwards says
+    /// nothing about what it does with what it read is asking to be taken on
+    /// trust; this says it on every screen, for as long as the app is open.
+    ///
+    /// Deliberately grey and deliberately dull. A coloured shield badge is the
+    /// house style of the software this app is trying not to be mistaken for,
+    /// and the claim is cheap either way — every disk cleaner on the market
+    /// makes it. What is not cheap is the two ways to check it, which is why
+    /// the mark is a button rather than a label.
+    private var offlineMark: some View {
+        Button { explainingOffline.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "wifi.slash").font(.system(size: 9, weight: .medium))
+                Text("Local only").font(.system(size: 10))
+            }
+            .foregroundStyle(Theme.muted)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Everything stays on this Mac. Click to see how to check that.")
+        .popover(isPresented: $explainingOffline, arrowEdge: .bottom) { offlineProof }
+    }
+
+    /// Two checks the user can run without taking the app's word for anything.
+    ///
+    /// Entitlements are deliberately not offered as evidence: this ships ad-hoc
+    /// signed and outside the sandbox, where the absence of
+    /// `com.apple.security.network.client` proves nothing at all — no entitlement
+    /// list is enforced on a build nobody notarised, so citing one would be the
+    /// single claim here that anyone who knows the platform could pull apart.
+    private var offlineProof: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Everything stays on this Mac")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.ink)
+            Text("Disk Reclaim has no networking code in it. What it reads about your disk is never uploaded, shared or reported anywhere, and there is no telemetry and no update check.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider().overlay(Theme.hairline).padding(.vertical, 1)
+
+            Text("Two ways to check that, rather than take our word for it")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.ink.opacity(0.85))
+            proofRow("binoculars", "Watch it while it works. Open Activity Monitor, pick the Network tab, and run a scan. Bytes sent stays at zero. Little Snitch or LuLu will tell you the same thing.")
+            // Naming the banned symbols here would be better copy and worse
+            // engineering: the test greps for those literals in every shipped
+            // .swift file, and this file is one of them.
+            proofRow("checkmark.seal", "Read the guarantee in the source. A test walks every line the app ships and fails if it finds any of the system's networking APIs — the URL loading system, the modern connection framework, or a raw socket. Adding networking to this app means deleting that test first.")
+        }
+        .padding(14)
+        .frame(width: 340)
+    }
+
+    private func proofRow(_ symbol: String, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.muted)
+                .frame(width: 14)
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var footer: some View {
         HStack(spacing: 18) {
             legendItem(.exact, "Free to refetch")
@@ -223,9 +313,7 @@ struct ContentView: View {
 
             Spacer()
 
-            if let blocked = licence.blockedReason {
-                Text(blocked).font(.system(size: 11)).foregroundStyle(Theme.warn)
-            } else if let outcome = model.lastReclaim {
+            if let outcome = model.lastReclaim {
                 Text(outcome).font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
 
@@ -233,12 +321,8 @@ struct ContentView: View {
                 .font(.system(size: 12, weight: .medium).monospacedDigit())
                 .foregroundStyle(model.reclaimable.isEmpty ? Theme.muted : Theme.ink)
 
-            if licence.canReclaim {
-                Button("Review…") { reviewing = true }
-                    .disabled(model.reclaimable.isEmpty)
-            } else {
-                Button("Unlock to Reclaim…") { showingLicence = true }
-            }
+            Button("Review…") { reviewing = true }
+                .disabled(model.reclaimable.isEmpty)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
@@ -312,10 +396,7 @@ struct ContentView: View {
                 Button("Reclaim \(chosen.count) \(chosen.count == 1 ? "cache" : "caches")") {
                     let ids = chosen
                     reviewing = false
-                    Task {
-                        await model.reclaim(ids)
-                        licence.refresh()
-                    }
+                    Task { await model.reclaim(ids) }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(chosen.isEmpty)

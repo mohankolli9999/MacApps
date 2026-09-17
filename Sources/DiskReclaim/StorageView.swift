@@ -1,29 +1,46 @@
+import QuickLook
 import SwiftUI
 import ReclaimCore
 
 struct StorageView: View {
     @Bindable var model: StorageModel
     let access: FullDiskAccess.Access
-    @Bindable var licence: LicenseModel
     let onRequestAccess: () -> Void
-    let onOpenLicence: () -> Void
 
     @State private var hovered: String?
+    @State private var focused: String?
+    @State private var previewing: URL?
+    @FocusState private var listFocused: Bool
     @State private var confirming = false
     @State private var paused = true
     /// Which footer counter has its list open, if any.
     @State private var opened: String?
+    @State private var reviewing = false
+    /// Which caches the review sheet has ticked. Its own state rather than the
+    /// tray's, so closing the sheet without acting leaves the tray as it was.
+    @State private var ticked: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
             locationBar
             Divider().overlay(Theme.hairline)
 
+            // Above the tree check on purpose. Every figure this screen is about
+            // to show is suppressed by the snapshot, so the reason has to be on
+            // screen before the numbers are, not after the user has drawn their
+            // own conclusion about them.
+            if !model.pinningSnapshots.isEmpty, !model.snapshotNoticeDismissed {
+                snapshotBanner(model.pinningSnapshots)
+            }
+
             if model.tree == nil {
                 model.isScanning ? AnyView(opening) : AnyView(idle)
             } else {
                 if model.isScanning { scanStrip }
-                if access != .granted { accessBanner }
+                if !model.isScanning, let caches = model.caches,
+                   !caches.findings.isEmpty, !model.cacheNoticeDismissed {
+                    cacheBanner(caches)
+                }
                 HStack(spacing: 0) {
                     StorageMapView(nodes: model.listing,
                                    remainder: model.current?.unlistedBytes ?? 0,
@@ -61,7 +78,20 @@ struct StorageView: View {
                 paused = true
             }
         }
+        // Polled, because nothing tells an app that free space moved. Emptying
+        // the Trash, another app writing, a Time Machine snapshot expiring: all
+        // of them change the number under a figure that would otherwise have
+        // been read once at launch and never again.
+        .task {
+            while !Task.isCancelled {
+                await model.refreshSpace()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
         .sheet(isPresented: $confirming) { confirmation }
+        .sheet(isPresented: $reviewing) {
+            if let caches = model.caches { cacheReview(caches) }
+        }
     }
 
     private var emptyMessage: String {
@@ -86,7 +116,11 @@ struct StorageView: View {
 
             Spacer(minLength: 8)
 
+            capacity
+
             if let here = model.current {
+                Rectangle().fill(Theme.hairline).frame(width: 1, height: 16)
+
                 HStack(spacing: 4) {
                     Text(humanBytes(here.reclaimableBytes))
                         .font(.system(size: 12, weight: .medium).monospacedDigit())
@@ -132,7 +166,6 @@ struct StorageView: View {
     private var opening: some View {
         VStack(spacing: 10) {
             Spacer()
-            capacity
             ProgressView().controlSize(.small)
             Text("Opening \(model.root.name)")
                 .font(.system(size: 12))
@@ -144,30 +177,38 @@ struct StorageView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// The one true thing available before any walking happens.
+    /// The one true thing available before any walking happens, and the one
+    /// thing still worth showing long after.
     ///
     /// A full scan is a minute or more and every frame of it used to be blank,
     /// which is indistinguishable from a hung app and is most of what "the app
     /// is slow" actually describes. This costs a syscall and answers the first
-    /// question anyone opens the app with.
+    /// question anyone opens the app with. It sits in the location bar and not
+    /// on the waiting screen so that it survives the map arriving: the question
+    /// "how much room have I got" does not stop being the point once there is
+    /// something to look at — it is the reason the user is looking.
+    ///
+    /// Deliberately not adjusted by what is in the tray. The Trash is a folder
+    /// on this same volume, so a gigabyte moved there frees nothing until the
+    /// Trash is emptied, and a bar that filled back in as things were ticked
+    /// would be promising space the disk does not have yet.
     @ViewBuilder private var capacity: some View {
         if let space = model.space {
-            VStack(spacing: 7) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Theme.hairline.opacity(0.6))
-                        Capsule().fill(Theme.ink.opacity(0.55))
-                            .frame(width: geo.size.width
-                                   * min(1, Double(space.used) / Double(max(1, space.capacity))))
-                    }
+            HStack(spacing: 7) {
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.hairline.opacity(0.7))
+                    Capsule().fill(Theme.ink.opacity(0.45))
+                        .frame(width: 64 * min(1, Double(space.used) / Double(max(1, space.capacity))))
                 }
-                .frame(width: 320, height: 6)
+                .frame(width: 64, height: 5)
 
-                Text("\(humanBytes(space.used)) used · \(humanBytes(space.free)) free of \(humanBytes(space.capacity))")
+                Text("\(humanBytes(space.used)) used · \(humanBytes(space.free)) free")
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(Theme.muted)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.3), value: space.free)
             }
-            .padding(.bottom, 6)
+            .help("\(model.root.name) holds \(humanBytes(space.capacity)) and has \(humanBytes(space.free)) left. Moving files to the Trash does not give the space back until the Trash is emptied.")
         }
     }
 
@@ -213,7 +254,6 @@ struct StorageView: View {
     private var idle: some View {
         VStack(spacing: 12) {
             Spacer()
-            capacity
             Text("Measure \(model.root.name)")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.ink)
@@ -229,17 +269,37 @@ struct StorageView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var accessBanner: some View {
+    // MARK: - Caches
+
+    /// A snapshot keeps every block the volume held when it was taken, so files
+    /// older than it free nothing when deleted. The scan reports that correctly
+    /// — it is the one measurement here no competitor makes — but a disk that
+    /// reads as almost entirely unreclaimable looks like a broken scan unless
+    /// the screen says why.
+    private func snapshotBanner(_ snapshots: [VolumeLedger.Snapshot]) -> some View {
         HStack(spacing: 9) {
-            Image(systemName: "lock.fill").font(.system(size: 10)).foregroundStyle(Theme.warn)
-            Text(accessNote)
+            Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.ink.opacity(0.85))
-            Spacer()
-            Button("Grant Access…") { onRequestAccess() }
-                .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Theme.warn)
+            Text(snapshots.count == 1
+                 ? "A snapshot is holding this volume's older files"
+                 : "\(snapshots.count) snapshots are holding this volume's older files")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.ink.opacity(0.9))
+            Text("Files it contains free nothing until it expires, usually within a day, so they read as reclaiming zero here.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .lineLimit(1)
+            Spacer()
+            Button {
+                model.snapshotNoticeDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+            }
+            .buttonStyle(.plain)
+            .help("Hide until the next scan")
         }
         .padding(.horizontal, 14)
         .frame(height: 30)
@@ -247,35 +307,280 @@ struct StorageView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
     }
 
-    /// What the scan hit beats what the permission probe guessed. A count of
-    /// refused folders is evidence; `.unknown` is the probe admitting it found
-    /// nothing to test against, and stating that is better than asserting a
-    /// denial the user may already have lifted.
-    private var accessNote: String {
-        if model.unreadableLocations > 0 {
-            return "\(model.unreadableLocations) locations could not be read. Totals here are lower than the truth."
+    /// Sits above the map rather than opening ahead of it. The map is what the
+    /// user came for and what makes the number below believable; a screen that
+    /// opened on this instead would be asking them to act on a figure they had
+    /// not yet been shown the basis for.
+    private func cacheBanner(_ caches: CacheSurvey) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: "arrow.clockwise.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.gain)
+            Text("\(humanBytes(caches.floorBytes)) in \(caches.findings.count) browser and app caches")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.ink.opacity(0.9))
+            Text("These free up now and refill as you use the apps.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+            Spacer()
+            Button("Review") {
+                // Derived data arrives ticked and service worker storage does
+                // not, which is the whole difference between the two groups.
+                ticked = Set(caches.derived.map(\.id))
+                reviewing = true
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Theme.gain)
+            Button {
+                model.cacheNoticeDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+            }
+            .buttonStyle(.plain)
+            .help("Hide until the next scan")
         }
-        return access == .denied
-            ? "Without Full Disk Access some folders stay hidden from this map."
-            : "Full Disk Access could not be checked on this Mac. If totals look low, that is the likely reason."
+        .padding(.horizontal, 14)
+        .frame(height: 30)
+        .background(Theme.gain.opacity(0.10))
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.hairline).frame(height: 1) }
+    }
+
+    private func cacheReview(_ caches: CacheSurvey) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Browser and app caches")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                Text("Chromium is built into far more than browsers, and it keeps the same caches wherever it runs. These are the ones on this disk.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(20)
+
+            Divider().overlay(Theme.hairline)
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    if !caches.derived.isEmpty {
+                        cacheGroup("Safe to delete",
+                                   note: "Pure derived data. Each app refetches or rebuilds it as you go.",
+                                   findings: caches.derived,
+                                   bytes: caches.derivedFloorBytes)
+                    }
+                    if !caches.offline.isEmpty {
+                        cacheGroup("May hold offline data",
+                                   note: "Service workers can store pages and queued writes for offline use. Check before deleting.",
+                                   findings: caches.offline,
+                                   bytes: caches.offlineFloorBytes)
+                    }
+                }
+            }
+            .frame(maxHeight: 360)
+
+            Divider().overlay(Theme.hairline)
+
+            HStack(spacing: 12) {
+                Text(tickedBytes(caches) == 0
+                     ? "Nothing selected"
+                     : "\(humanBytes(tickedBytes(caches))) from \(ticked.count) \(ticked.count == 1 ? "cache" : "caches")")
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                Button("Cancel") { reviewing = false }
+                    .keyboardShortcut(.cancelAction)
+                // Deliberately hands these to the tray instead of deleting
+                // them. The tray is the only place that knows everything picked
+                // — here and off the map both — and deleting from this sheet
+                // would quote a total that ignores the rest of it.
+                Button("Add to selection") {
+                    model.collect(caches.findings.filter { ticked.contains($0.id) })
+                    // The notice has done its job once it has been acted on.
+                    // Leaving it up would go on offering bytes that are already
+                    // sitting in the tray underneath it.
+                    model.cacheNoticeDismissed = true
+                    reviewing = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(ticked.isEmpty)
+            }
+            .padding(20)
+        }
+        .frame(width: 620)
+        .background(Theme.stage)
+    }
+
+    private func tickedBytes(_ caches: CacheSurvey) -> Int64 {
+        caches.findings
+            .filter { ticked.contains($0.id) }
+            .reduce(0) { $0 + $1.node.reclaimableBytes }
+    }
+
+    private func cacheGroup(_ title: String,
+                            note: String,
+                            findings: [CacheSurvey.Finding],
+                            bytes: Int64) -> some View {
+        let ids = Set(findings.map(\.id))
+        let all = ids.isSubset(of: ticked)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 9) {
+                Toggle(isOn: Binding(get: { all },
+                                     set: { on in
+                                         if on { ticked.formUnion(ids) } else { ticked.subtract(ids) }
+                                     })) { EmptyView() }
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.ink)
+                    Text(note)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Text(humanBytes(bytes))
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Theme.muted)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(Theme.stageEdge)
+
+            ForEach(findings) { finding in
+                HStack(spacing: 9) {
+                    Toggle(isOn: Binding(get: { ticked.contains(finding.id) },
+                                         set: { on in
+                                             if on { ticked.insert(finding.id) }
+                                             else { ticked.remove(finding.id) }
+                                         })) { EmptyView() }
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(finding.cache.owner)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.ink)
+                            Text(finding.cache.contents)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.muted)
+                        }
+                        Text(abbreviate(finding.node.url.path))
+                            .font(.system(size: 10).monospaced())
+                            .foregroundStyle(Theme.muted.opacity(0.8))
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                    Text(humanBytes(finding.node.reclaimableBytes))
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Theme.muted)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                Divider().overlay(Theme.hairline.opacity(0.4))
+            }
+        }
     }
 
     // MARK: - Listing
 
     private var listing: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(model.listing) { node in
-                    row(node)
-                    Divider().overlay(Theme.hairline.opacity(0.4))
-                }
-                if let extra = model.current?.unlistedBytes, extra > 0 {
-                    remainderRow(extra)
+        ScrollViewReader { scroller in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(model.listing) { node in
+                        row(node).id(node.id)
+                        Divider().overlay(Theme.hairline.opacity(0.4))
+                    }
+                    if let extra = model.current?.unlistedBytes, extra > 0 {
+                        remainderRow(extra)
+                    }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Theme.stageEdge.opacity(0.5))
+            .focusable()
+            .focusEffectDisabled()
+            .focused($listFocused)
+            // Without this the keys do nothing until the list is clicked, and a
+            // keyboard user has no way to discover that a click is what is
+            // missing. The list is the only thing on this screen worth driving
+            // from the keyboard, so it starts with the focus.
+            .onAppear { listFocused = true }
+            .onKeyPress { press in handle(press, scroller: scroller) }
+            // Descending keeps no focus: the row that had it is not on screen any
+            // more, and carrying the index across would land on an unrelated file.
+            .onChange(of: model.current?.id) { focused = nil }
         }
-        .scrollContentBackground(.hidden)
-        .background(Theme.stageEdge.opacity(0.5))
+        .quickLookPreview($previewing)
+    }
+
+    /// One handler rather than a stack of `.onKeyPress(.upArrow)` modifiers,
+    /// because ⌘⌫ has to be told apart from ⌫ and only the general form carries
+    /// the modifiers. Anything not claimed here must return `.ignored` or it stops
+    /// reaching the rest of the window.
+    private func handle(_ press: KeyPress, scroller: ScrollViewProxy) -> KeyPress.Result {
+        // Matched against the modifiers that change what a key means, rather than
+        // against everything the event happens to carry. An arrow key arrives with
+        // numeric-pad and function set and caps lock is a modifier like any other,
+        // so an exact match against `[]` fires for none of them — and subtracting
+        // the incidental ones instead is a list only as complete as the last
+        // person to extend it, where the cost of missing a bit is that the whole
+        // of keyboard navigation goes quietly dead.
+        let modifiers = press.modifiers.intersection([.shift, .control, .option, .command])
+        switch (press.key, modifiers) {
+        case (.upArrow, []): moveFocus(by: -1, scroller: scroller)
+        case (.downArrow, []): moveFocus(by: 1, scroller: scroller)
+        case (.leftArrow, []):
+            guard model.breadcrumb.count > 1 else { return .ignored }
+            withAnimation(.easeOut(duration: 0.18)) { model.rise(to: model.breadcrumb.count - 1) }
+        case (.rightArrow, []), (.return, []):
+            guard let node = focusedNode, node.isExplorable else { return .ignored }
+            withAnimation(.easeOut(duration: 0.18)) { model.open(node) }
+        case (.space, []):
+            guard let node = focusedNode else { return .ignored }
+            preview(node)
+        case (.delete, .command):
+            guard let node = focusedNode, model.risk(of: node).isTrashable else { return .ignored }
+            model.toggle(node)
+        default:
+            return .ignored
+        }
+        return .handled
+    }
+
+    private var focusedNode: StorageNode? {
+        focused.flatMap { id in model.listing.first { $0.id == id } }
+    }
+
+    private func moveFocus(by step: Int, scroller: ScrollViewProxy) {
+        let rows = model.listing
+        guard !rows.isEmpty else { return }
+        let next = focused.flatMap { id in rows.firstIndex { $0.id == id } }
+            .map { min(rows.count - 1, max(0, $0 + step)) } ?? (step > 0 ? 0 : rows.count - 1)
+        focused = rows[next].id
+        scroller.scrollTo(rows[next].id, anchor: .center)
+    }
+
+    /// Space previews, except when previewing is the expensive thing on the
+    /// screen. A cloud placeholder holds no local bytes, so Quick Look would fetch
+    /// the whole file from the provider — and the app's own refusal to materialise
+    /// placeholders cannot stop it, because the preview is drawn in another
+    /// process. Saying what it would cost is more use than a preview anyway: the
+    /// size is the reason the row is worth looking at.
+    private func preview(_ node: StorageNode) {
+        switch StorageSafety.preview(for: node.url) {
+        case .allowed:
+            previewing = node.url
+        case .wouldDownload(let bytes):
+            model.note("\(node.name) is stored in the cloud. Nothing of it is on this disk, and previewing it would download \(humanBytes(bytes)).")
+        case .missing:
+            model.note("\(node.name) is no longer there. Measure again to update the totals.")
+        }
     }
 
     private func row(_ node: StorageNode) -> some View {
@@ -330,15 +635,36 @@ struct StorageView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(hovered == node.id ? Theme.ink.opacity(0.05) : .clear)
+        .background(focused == node.id ? Theme.ink.opacity(0.10)
+                    : hovered == node.id ? Theme.ink.opacity(0.05) : .clear)
+        // A bar on the leading edge rather than a ring, so keyboard focus is
+        // legible against the hover tint without competing with the risk hue the
+        // row already spends colour on.
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(focused == node.id ? Theme.ink.opacity(0.55) : .clear)
+                .frame(width: 2)
+        }
         .contentShape(Rectangle())
         .onHover { hovered = $0 ? node.id : (hovered == node.id ? nil : hovered) }
+        .onTapGesture { focused = node.id }
+        // Carries the key equivalents as much as the commands. The shortcuts work
+        // on the focused row whether or not this menu is open; a right-click is
+        // where someone finds out they exist.
         .contextMenu {
+            Button("Quick Look") { focused = node.id; preview(node) }
+                .keyboardShortcut(.space, modifiers: [])
             Button("Reveal in Finder") { model.reveal(node) }
+            if node.isExplorable {
+                Button("Open") { withAnimation(.easeOut(duration: 0.18)) { model.open(node) } }
+                    .keyboardShortcut(.rightArrow, modifiers: [])
+            }
             if level.isTrashable {
-                Button(model.selection.contains(node.id) ? "Deselect" : "Select") {
+                Divider()
+                Button(model.selection.contains(node.id) ? "Deselect" : "Select for the Trash") {
                     model.toggle(node)
                 }
+                .keyboardShortcut(.delete, modifiers: .command)
             }
         }
     }
@@ -428,10 +754,24 @@ struct StorageView: View {
                         label: model.unreadableLocations == 1
                             ? "1 folder could not be read"
                             : "\(model.unreadableLocations) folders could not be read",
-                        note: "The scan was refused these, so their bytes are missing from every total above. Full Disk Access is almost always the reason.",
+                        // The repair rides along only when the probe actually
+                        // came back denied — see `AccessGate.detail` for why it
+                        // describes no pane state. Offered to someone whose
+                        // access is fine, it would send them to undo a working
+                        // grant over folders that were never going to be read.
+                        note: access == .denied
+                            ? "The scan was refused these, so their bytes are missing from every total above. Full Disk Access is almost always the reason. If Disk Reclaim is already listed there, remove it and add it again."
+                            : "The scan was refused these, so their bytes are missing from every total above. Full Disk Access is almost always the reason.",
                         paths: model.unreadablePaths,
                         total: model.unreadableLocations,
-                        tint: Theme.warn)
+                        tint: Theme.warn,
+                        // The one route to the permission after the opening
+                        // screen, and the user has to open this list to find
+                        // it. An app that keeps a Grant Access button in front
+                        // of someone who has already answered is nagging; one
+                        // that offers it where they came asking why the folders
+                        // are missing is answering the question.
+                        action: ("Open Full Disk Access…", onRequestAccess))
             }
 
             if model.cloudOnlyLocations > 0 {
@@ -471,9 +811,7 @@ struct StorageView: View {
 
             Spacer()
 
-            if let blocked = licence.blockedReason {
-                Text(blocked).font(.system(size: 11)).foregroundStyle(Theme.warn)
-            } else if let note = model.lastAction {
+            if let note = model.lastAction {
                 Text(note).font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
 
@@ -485,12 +823,8 @@ struct StorageView: View {
                     .foregroundStyle(Theme.ink)
             }
 
-            if licence.canReclaim {
-                Button("Move to Trash…") { confirming = true }
-                    .disabled(model.selection.isEmpty)
-            } else {
-                Button("Unlock to Remove…") { onOpenLicence() }
-            }
+            Button("Move to Trash…") { confirming = true }
+                .disabled(model.selection.isEmpty)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
@@ -506,7 +840,8 @@ struct StorageView: View {
                          note: String,
                          paths: [String],
                          total: Int,
-                         tint: Color) -> some View {
+                         tint: Color,
+                         action: (title: String, run: () -> Void)? = nil) -> some View {
         Button { opened = opened == id ? nil : id } label: {
             HStack(spacing: 4) {
                 Text(label).font(.system(size: 11)).foregroundStyle(tint)
@@ -556,6 +891,18 @@ struct StorageView: View {
                         .foregroundStyle(Theme.muted)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
+                }
+                if let action {
+                    Divider().overlay(Theme.hairline)
+                    Button(action.title) {
+                        opened = nil
+                        action.run()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                 }
             }
             .frame(width: 380)
@@ -640,7 +987,6 @@ struct StorageView: View {
                 Button("Move to Trash") {
                     confirming = false
                     model.trashSelected()
-                    licence.refresh()
                 }
                 .keyboardShortcut(.defaultAction)
             }

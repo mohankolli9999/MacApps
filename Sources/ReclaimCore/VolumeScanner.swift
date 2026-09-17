@@ -114,9 +114,12 @@ private final class Assembly: @unchecked Sendable {
 
     func start(_ path: String) { lock.withLock { running[path] = 0 } }
 
-    func tick(_ path: String, bytes: Int64, at place: String) {
+    /// Adds to a branch's running total rather than setting it: the bytes now
+    /// arrive from whichever worker happened to take a directory, so no single
+    /// caller knows what the branch has reached so far.
+    func advance(_ path: String, by bytes: Int64, at place: String) {
         lock.withLock {
-            running[path] = bytes
+            running[path, default: 0] += bytes
             location = place
         }
     }
@@ -142,6 +145,145 @@ private final class Assembly: @unchecked Sendable {
             (running, Array(done.values), unreadable, cloudOnly, offVolume, firmlinks,
              unproven, location)
         }
+    }
+}
+
+/// Everything a walk collects that is not bytes.
+private struct Tally {
+    var unreadable = Locations()
+    var cloudOnly = Locations()
+    var offVolume = Locations()
+    var firmlinks = 0
+    var unproven: Int64 = 0
+
+    mutating func merge(_ other: Tally) {
+        unreadable.merge(other.unreadable)
+        cloudOnly.merge(other.cloudOnly)
+        offVolume.merge(other.offVolume)
+        firmlinks += other.firmlinks
+        unproven += other.unproven
+    }
+}
+
+/// A directory whose own listing is done but whose subtree is not.
+///
+/// Recursion gets the tree for free — a child's node is a return value. A work
+/// queue cannot, because the worker that lists a directory is rarely the one
+/// that finishes its children. So every directory keeps a shelf, and whichever
+/// child happens to finish last is the one that folds the shelf into its
+/// parent. `pending` counts what is outstanding: the directory's own listing,
+/// plus one for each subdirectory handed to the queue. Only the frontier's lock
+/// touches any of it.
+private final class Shelf {
+    let url: URL
+    let parent: Shelf?
+    /// The top-level branch this sits under, which is the key the assembly and
+    /// the progress display know it by however deep it actually is.
+    let branch: String
+    /// Carried rather than re-probed: once a firmlink has been followed, every
+    /// directory below it is legitimately on the other volume.
+    let device: dev_t
+    var listed: [StorageNode] = []
+    var total: Int64 = 0
+    var free: Int64 = 0
+    var unlisted: Int64 = 0
+    var tally = Tally()
+    var pending = 1
+    var sealed = false
+
+    init(url: URL, parent: Shelf?, branch: String, device: dev_t) {
+        self.url = url
+        self.parent = parent
+        self.branch = branch
+        self.device = device
+    }
+
+    func seal(_ listThreshold: Int64) -> StorageNode {
+        sealed = true
+        listed.sort { $0.physicalBytes > $1.physicalBytes }
+        return StorageNode(url: url,
+                           name: url.lastPathComponent,
+                           physicalBytes: total,
+                           reclaimableBytes: free,
+                           isDirectory: true,
+                           children: listed,
+                           unlistedBytes: unlisted)
+    }
+
+    func absorb(_ node: StorageNode, _ below: Tally, _ listThreshold: Int64) {
+        total += node.physicalBytes
+        free += node.reclaimableBytes
+        if node.physicalBytes >= listThreshold {
+            listed.append(node)
+        } else {
+            unlisted += node.physicalBytes
+        }
+        tally.merge(below)
+    }
+}
+
+/// Directories waiting to be walked, handed out one at a time.
+///
+/// Splitting the work at the root instead gives each thread a whole top-level
+/// branch and nothing to do once it lands — and `~/Library` alone holds over
+/// half of a home folder's directories, so most threads finish early and then
+/// wait for one. The ceiling that imposes is a property of the tree's shape,
+/// not of the machine, so it does not lift on faster hardware. Handing out
+/// single directories keeps every worker fed until the tree is exhausted.
+///
+/// Termination counts outstanding directories rather than idle workers,
+/// because an empty queue means "nothing to hand out yet", which is not the
+/// same as "nothing left": a worker still listing will produce more.
+private final class Frontier: @unchecked Sendable {
+    private let gate = NSCondition()
+    private var waiting: [Shelf] = []
+    private var outstanding = 0
+    private var stopped = false
+
+    init(_ shelves: [Shelf]) {
+        waiting = shelves
+        outstanding = shelves.count
+        stopped = shelves.isEmpty
+    }
+
+    func push(_ shelves: [Shelf]) {
+        guard !shelves.isEmpty else { return }
+        gate.lock()
+        waiting.append(contentsOf: shelves)
+        outstanding += shelves.count
+        // One wake per directory: a broadcast sends every idle worker to race
+        // for the same one and go back to sleep.
+        for _ in shelves.indices { gate.signal() }
+        gate.unlock()
+    }
+
+    func finished() {
+        gate.lock()
+        outstanding -= 1
+        if outstanding == 0 {
+            stopped = true
+            gate.broadcast()
+        }
+        gate.unlock()
+    }
+
+    func stop() {
+        gate.lock()
+        stopped = true
+        gate.broadcast()
+        gate.unlock()
+    }
+
+    /// Depth first, so the frontier stays short and a subtree is finished and
+    /// released rather than half-built across the whole disk at once.
+    func next() -> Shelf? {
+        gate.lock()
+        defer { gate.unlock() }
+        while !stopped {
+            if let shelf = waiting.popLast() { return shelf }
+            gate.wait()
+        }
+        return nil
     }
 }
 
@@ -240,6 +382,28 @@ public enum VolumeScanner {
     /// can never fire. Only a single `getattrlist` on the path resolves the
     /// join. Directories only: a file cannot be a firmlink, and a syscall per
     /// file would be paid three hundred thousand times to learn nothing.
+    /// Where a directory the scan could not list belongs in the tally.
+    ///
+    /// `unreadable` means "I was not allowed to look", and that is how the
+    /// display reads it — a count that says every total above is low. Two other
+    /// things reach this point and neither is that. A directory that existed
+    /// when its parent was listed and was gone by the time it was opened leaves
+    /// nothing missing from the total, because there is nothing left to count.
+    /// A dataless one is not a failure at all: its bytes are on a server, so
+    /// none of them are on this disk, and that is the complete answer.
+    ///
+    /// Worth separating because none of the three is told apart by the disk.
+    /// `~/Library/Caches` churns constantly, so the faster the walk reaches a
+    /// directory after listing its parent, the fewer vanished ones it meets —
+    /// which had the parallel walk reporting several dozen refusals that the
+    /// serial one did not.
+    ///
+    /// Anything that is not a listing error at all has no better home than
+    /// unreadable: the bytes were not counted and the scan cannot say why.
+    private static func disposition(of error: Error) -> FileSpace.ListingError.Disposition {
+        (error as? FileSpace.ListingError)?.disposition ?? .unreadable
+    }
+
     private static func resolvedDevice(_ path: String, default fallback: dev_t) -> dev_t {
         FileSpace.inspect(path)?.device ?? fallback
     }
@@ -312,6 +476,16 @@ public enum VolumeScanner {
         // Staying on one device keeps a scan of / from wandering into network
         // shares and disk images, neither of which is the space the user is
         // looking at.
+        //
+        // It also bounds which volumes the accounting rules have to know about.
+        // Refusing mount points means a walk of / touches two devices — the
+        // sealed system volume and the Data volume it firmlinks onto — and both
+        // are recorded before the walk starts. Descending into mounts instead
+        // reaches twelve, including ones that appear mid-scan and autofs
+        // automounts that cannot be enumerated up front at all, and every
+        // unrecorded device silently falls back to `exact`, which promises the
+        // user bytes a snapshot is holding. Relaxing this guard means moving
+        // accounting to per-device resolution first.
         let device = probe.device
 
         var unreadable = Locations()
@@ -400,7 +574,11 @@ public enum VolumeScanner {
                 return true
                 }
             } catch {
-                unreadable.note(directory.path)
+                switch Self.disposition(of: error) {
+                case .unreadable: unreadable.note(directory.path)
+                case .elsewhere: cloudOnly.note(directory.path)
+                case .vanished: break
+                }
                 return StorageNode(url: directory,
                                    name: directory.lastPathComponent,
                                    physicalBytes: 0,
@@ -501,7 +679,7 @@ public enum VolumeScanner {
 
         // Directories become parallel branches; root-level files are measured
         // here, because there is nothing to parallelise about a single read.
-        var branches: [URL] = []
+        var branches: [(url: URL, device: dev_t)] = []
         var files: [StorageNode] = []
         var fileUnlisted: Int64 = 0
         var fileFree: Int64 = 0
@@ -529,13 +707,12 @@ public enum VolumeScanner {
                     placeholders.note(child.path)
                     continue
                 }
-                // Counted here rather than inside the branch: the branch scan
-                // re-derives its bound from its own root, so by the time it
-                // runs the crossing it was reached through is behind it.
-                if Self.resolvedDevice(child.path, default: device) != device {
-                    firmlinkSplits += 1
-                }
-                branches.append(child)
+                // Counted here rather than inside the branch: the bound travels
+                // down with the walk, so by the time the branch runs, the
+                // crossing it was reached through is behind it.
+                let below = Self.resolvedDevice(child.path, default: device)
+                if below != device { firmlinkSplits += 1 }
+                branches.append((child, below))
             case .file:
                 guard !entry.isCloudPlaceholder,
                       ledger.claim(device: entry.device, inode: entry.inode)
@@ -567,9 +744,9 @@ public enum VolumeScanner {
         let rootOffVolume = crossings
         let rootFirmlinks = firmlinkSplits
         let assembly = Assembly()
-        for branch in branches { assembly.start(branch.path) }
+        for branch in branches { assembly.start(branch.url.path) }
 
-        func snapshot() -> Progress {
+        @Sendable func snapshot() -> Progress {
             let state = assembly.read()
             var listed = rootFiles
             var unlisted = rootUnlisted
@@ -625,7 +802,7 @@ public enum VolumeScanner {
         // other, which puts a finished folder back to "still counting" and walks
         // the running total backwards.
         let mouth = NSLock()
-        func emit() {
+        @Sendable func emit() {
             mouth.withLock { onUpdate(snapshot()) }
         }
 
@@ -639,44 +816,214 @@ public enum VolumeScanner {
             }
         }
 
-        // The walk is blocking metadata I/O from end to end, so it belongs on
-        // GCD rather than the cooperative pool, whose threads it would occupy
-        // wholesale and leave nothing to run the ticker on. `concurrentPerform`
-        // also bounds the width to the machine for free.
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                DispatchQueue.concurrentPerform(iterations: branches.count) { index in
-                    let branch = branches[index]
-                    let result = (try? scan(branch,
-                                            listThreshold: listThreshold,
-                                            skipping: skipping,
-                                            ledger: ledger,
-                                            progressInterval: publishInterval,
-                                            onProgress: { assembly.tick(branch.path, bytes: $0.bytes, at: $0.location) },
-                                            isCancelled: isCancelled))
-                        ?? Result(root: StorageNode(url: branch,
-                                                    name: branch.lastPathComponent,
-                                                    physicalBytes: 0,
-                                                    reclaimableBytes: 0,
-                                                    isDirectory: true,
-                                                    children: [],
-                                                    unlistedBytes: 0),
-                                  unreadable: {
-                                      var refused = Locations()
-                                      refused.note(branch.path)
-                                      return refused
-                                  }(),
-                                  unprovenBytes: 0)
-                    assembly.finish(branch.path, result.root,
-                                    unreadable: result.unreadable,
-                                    cloudOnly: result.cloudOnly,
-                                    offVolume: result.offVolume,
-                                    firmlinks: result.firmlinkCrossings,
-                                    unproven: result.unprovenBytes)
-                    emit()
+        let stems = branches.map {
+            Shelf(url: $0.url, parent: nil, branch: $0.url.path, device: $0.device)
+        }
+        let frontier = Frontier(stems)
+        let shelves = NSLock()
+
+        /// Marks one of a shelf's obligations met, and folds every shelf that
+        /// leaves with nothing outstanding into its parent. Iterative rather
+        /// than recursive because the cascade runs the depth of the tree.
+        @Sendable func settle(_ start: Shelf) {
+            var completed: (Shelf, StorageNode)?
+            shelves.withLock {
+                var cursor: Shelf? = start
+                while let current = cursor {
+                    current.pending -= 1
+                    guard current.pending == 0 else { return }
+                    let node = current.seal(listThreshold)
+                    guard let parent = current.parent else {
+                        completed = (current, node)
+                        return
+                    }
+                    parent.absorb(node, current.tally, listThreshold)
+                    cursor = parent
                 }
-                continuation.resume()
             }
+            guard let (branch, node) = completed else { return }
+            assembly.finish(branch.branch, node,
+                            unreadable: branch.tally.unreadable,
+                            cloudOnly: branch.tally.cloudOnly,
+                            offVolume: branch.tally.offVolume,
+                            firmlinks: branch.tally.firmlinks,
+                            unproven: branch.tally.unproven)
+            emit()
+        }
+
+        @Sendable func work() {
+            while let shelf = frontier.next() {
+                if isCancelled() { frontier.stop(); return }
+
+                var total: Int64 = 0
+                var free: Int64 = 0
+                var unlisted: Int64 = 0
+                var scanned: Int64 = 0
+                var listed: [StorageNode] = []
+                var children: [Shelf] = []
+                var tally = Tally()
+                let bound = shelf.device
+
+                // Restarts from nothing each time so the listing can be asked
+                // for twice. Keeping a partial read and topping it up would
+                // count whatever arrived before the failure a second time.
+                func attempt() throws {
+                    total = 0
+                    free = 0
+                    unlisted = 0
+                    scanned = 0
+                    listed = []
+                    children = []
+                    tally = Tally()
+                    try FileSpace.stream(shelf.url.path) { listing in
+                        if isCancelled() { return false }
+                        let child = shelf.url.appendingPathComponent(listing.name)
+                        if skipping.contains(child.path) { return true }
+
+                        let entry = listing.entry
+                        guard entry.device == bound, !entry.isMountPoint else {
+                            // A symlink or socket holds nothing wherever it
+                            // lives, so counting one would inflate the tally
+                            // with entries that cost the user no space.
+                            if entry.kind != .other { tally.offVolume.note(child.path) }
+                            return true
+                        }
+
+                        switch entry.kind {
+                        case .directory:
+                            if entry.isCloudPlaceholder {
+                                tally.cloudOnly.note(child.path)
+                                return true
+                            }
+                            let below = Self.resolvedDevice(child.path, default: bound)
+                            if below != bound { tally.firmlinks += 1 }
+                            children.append(Shelf(url: child, parent: shelf,
+                                                  branch: shelf.branch, device: below))
+                        case .file:
+                            guard !entry.isCloudPlaceholder,
+                                  ledger.claim(device: entry.device, inode: entry.inode)
+                            else { return true }
+                            let bytes = entry.allocatedBytes
+                            total += bytes
+                            free += entry.reclaimableBytes
+                            scanned += bytes
+                            if entry.sharing == .partial {
+                                tally.unproven += bytes - entry.reclaimableBytes
+                            }
+                            if bytes >= listThreshold {
+                                listed.append(StorageNode(url: child,
+                                                          name: listing.name,
+                                                          physicalBytes: bytes,
+                                                          reclaimableBytes: entry.reclaimableBytes,
+                                                          isDirectory: false,
+                                                          children: [],
+                                                          unlistedBytes: 0))
+                            } else {
+                                unlisted += bytes
+                            }
+                        case .other:
+                            return true
+                        }
+                        return true
+                    }
+                }
+
+                var failure: Error?
+                do {
+                    try attempt()
+                } catch {
+                    failure = error
+                }
+
+                // Ask once more before calling it a refusal. A cloud file
+                // provider being asked for sixteen directories at once
+                // intermittently turns one down and then hands it over without
+                // complaint on the next ask — the serial walk never asked fast
+                // enough to provoke it, so the parallel walk was reporting
+                // locations as unlistable that nothing was wrong with. That
+                // lands the user under an offer of Full Disk Access, which is
+                // the wrong thing to tell someone whose permissions are fine.
+                // A directory that is genuinely refused costs one extra syscall
+                // to confirm it. The errors that cannot change are not asked
+                // twice: retrying a dataless directory is measurably wasted.
+                if let error = failure, Self.disposition(of: error).isWorthAskingAgain {
+                    do {
+                        try attempt()
+                        failure = nil
+                    } catch {
+                        failure = error
+                    }
+                }
+
+                if let failure {
+                    // What the serial walk reports for a directory it could not
+                    // list: nothing, and no children. Notes taken before the
+                    // read failed are kept, because they did happen.
+                    total = 0
+                    free = 0
+                    unlisted = 0
+                    scanned = 0
+                    listed = []
+                    children = []
+                    switch Self.disposition(of: failure) {
+                    case .unreadable: tally.unreadable.note(shelf.url.path)
+                    case .elsewhere: tally.cloudOnly.note(shelf.url.path)
+                    case .vanished: break
+                    }
+                }
+
+                shelves.withLock {
+                    // The children are counted before they are handed out. One
+                    // that finished before its parent's count included it would
+                    // fold the parent while the rest of the subtree is still
+                    // being walked, and the branch would land short.
+                    shelf.pending += children.count
+                    shelf.total += total
+                    shelf.free += free
+                    shelf.unlisted += unlisted
+                    shelf.listed += listed
+                    shelf.tally.merge(tally)
+                }
+                frontier.push(children)
+                assembly.advance(shelf.branch, by: scanned, at: shelf.url.path)
+                settle(shelf)
+                frontier.finished()
+            }
+        }
+
+        // The walk is blocking metadata I/O from end to end, so it belongs on
+        // threads of its own rather than the cooperative pool, whose threads it
+        // would occupy wholesale and leave nothing to run the ticker on. Plain
+        // threads rather than a GCD pool because these are meant to sit blocked:
+        // a pool sized to the machine would hand out fewer than asked for and
+        // the workers waiting for work would never be woken.
+        let width = min(16, max(2, ProcessInfo.processInfo.activeProcessorCount * 2))
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let crew = DispatchGroup()
+            for index in 0 ..< width {
+                crew.enter()
+                let worker = Thread {
+                    work()
+                    crew.leave()
+                }
+                worker.name = "reclaim.walk.\(index)"
+                worker.qualityOfService = .userInitiated
+                worker.start()
+            }
+            crew.notify(queue: .global(qos: .userInitiated)) { continuation.resume() }
+        }
+
+        // A cancelled walk leaves shelves that will never reach zero, and a
+        // branch that never settles never reaches the assembly at all — the
+        // tree would come back missing whole top-level folders rather than
+        // merely short, and the display would keep marking them as measuring.
+        for stem in stems where !stem.sealed {
+            assembly.finish(stem.branch, stem.seal(listThreshold),
+                            unreadable: stem.tally.unreadable,
+                            cloudOnly: stem.tally.cloudOnly,
+                            offVolume: stem.tally.offVolume,
+                            firmlinks: stem.tally.firmlinks,
+                            unproven: stem.tally.unproven)
         }
 
         ticker.cancel()

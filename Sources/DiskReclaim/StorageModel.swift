@@ -47,6 +47,17 @@ final class StorageModel {
 
     private(set) var roots: [Root] = []
     private(set) var tree: StorageNode?
+    /// The browser caches on the finished tree.
+    ///
+    /// Worked out once the walk lands rather than on every redraw, and not at
+    /// all while one is running: the tree is reassigned on each progress tick,
+    /// so tracking it would re-walk the tree ten times a second on the main
+    /// actor to advertise a figure that is still climbing. Nothing is offered
+    /// off a partial count.
+    private(set) var caches: CacheSurvey?
+    /// Put away for this scan only. A new walk finds caches that have refilled
+    /// since, and saying so again is honest rather than nagging.
+    var cacheNoticeDismissed = false
     private(set) var isScanning = false
     private(set) var progress: VolumeScanner.Tick?
     /// Node ids whose sizes are still climbing. Their blocks are drawn, and
@@ -78,8 +89,16 @@ final class StorageModel {
     private(set) var scannedAt: Date?
     private(set) var lastAction: String?
     /// What the chosen volume holds and has left, read in a syscall so the
-    /// window is never blank while a walk that takes a minute gets going.
+    /// window is never blank while a walk that takes a minute gets going, and
+    /// re-read on a timer after that so it keeps saying something true.
     private(set) var space: VolumeLedger.Space?
+    /// Snapshots holding this volume's blocks. While one exists, every file
+    /// older than it reports as freeing nothing — correctly, because until the
+    /// snapshot goes it would. The scan cannot show anything else, so the app
+    /// says why rather than presenting a disk that reclaims nothing.
+    private(set) var pinningSnapshots: [VolumeLedger.Snapshot] = []
+    /// Put away for this scan only, like the cache notice.
+    var snapshotNoticeDismissed = false
 
     var root: Root
     /// Node ids from the tree root down to what is on screen.
@@ -111,6 +130,26 @@ final class StorageModel {
         root = found[0]
         manifest = .standard
         space = VolumeLedger.space(at: found[0].url)
+        readVolume(found[0].url)
+    }
+
+    /// Establishes how a volume's numbers may be read, before anything reads any.
+    ///
+    /// Both facts are properties of the volume rather than of any file on it, and
+    /// neither is visible from inside the walk: a snapshot-pinned file and a
+    /// compressed one are indistinguishable per file, and so are a volume with no
+    /// private sizes and a volume where nothing is private.
+    /// Every mounted root, not only the one being scanned. A walk of `/` crosses
+    /// the firmlink onto the Data volume and keeps going, and those files have to
+    /// be read by their own volume's rules — otherwise scanning `/` while the
+    /// Data volume holds a snapshot reports exactly the bytes this is here to
+    /// stop being promised.
+    private func readVolume(_ url: URL) {
+        pinningSnapshots = VolumeLedger.snapshotsPinning(url)
+        for volume in Set(roots.map(\.url)).union([url]) {
+            FileSpace.record(volumeAt: volume,
+                             snapshotted: !VolumeLedger.snapshotsPinning(volume).isEmpty)
+        }
     }
 
     /// Browsable volumes first, then the ones macOS hides. Those hidden volumes
@@ -175,10 +214,31 @@ final class StorageModel {
         guard next != root else { return }
         root = next
         space = VolumeLedger.space(at: next.url)
+        readVolume(next.url)
         // Picks name paths on the volume being left. Carrying them across would
         // put another disk's bytes in this disk's total.
         collector.removeAll()
         scan()
+    }
+
+    /// Off the main actor because the read is 7 ms measured — nothing on its
+    /// own, and a dropped frame every time it lands if it ran where the map is
+    /// being drawn.
+    ///
+    /// Nothing recomputes this from what was trashed, and it must not: the
+    /// Trash is a folder on the same volume, so moving a gigabyte into it frees
+    /// nothing at all until it is emptied. The volume's own answer is the only
+    /// one that stays true.
+    func refreshSpace() async {
+        let scanned = root
+        let fresh = await Task.detached(priority: .utility) {
+            VolumeLedger.space(at: scanned.url)
+        }.value
+        // The volume can be switched while the read is in the air, and landing
+        // the old disk's figures under the new disk's name is worse than a
+        // figure two seconds out of date.
+        guard scanned == root else { return }
+        space = fresh
     }
 
     func scan() {
@@ -188,7 +248,14 @@ final class StorageModel {
         self.flag = flag
 
         tree = nil
+        caches = nil
         trail = []
+        cacheNoticeDismissed = false
+        snapshotNoticeDismissed = false
+        // Re-read per scan rather than once: Time Machine takes these hourly, so
+        // one can appear or expire between two walks of the same volume and the
+        // figures would change underneath an explanation that no longer applies.
+        readVolume(target)
         progress = nil
         measuring = []
         unreadableLocations = 0
@@ -217,6 +284,7 @@ final class StorageModel {
 
             guard !flag.isRaised else { return }
             tree = result?.root
+            caches = tree.map(CacheSurvey.init(of:))
             unreadableLocations = result?.unreadableLocations ?? 0
             cloudOnlyLocations = result?.cloudOnlyLocations ?? 0
             offVolumeLocations = result?.offVolumeLocations ?? 0
@@ -302,7 +370,22 @@ final class StorageModel {
     func discard(id: String) { collector.remove(id: id) }
     func clearCollector() { collector.removeAll() }
 
+    /// Hands the review sheet's ticks to the tray rather than deleting them.
+    ///
+    /// The tray is the one place that knows everything picked, from the map and
+    /// from here both, and it is what the Trash button reads. Deleting straight
+    /// from the sheet would either quote a total that ignores what is already
+    /// in the tray or quietly take those along too.
+    func collect(_ findings: [CacheSurvey.Finding]) {
+        for finding in findings { collector.add(finding.node) }
+    }
+
     func risk(of node: StorageNode) -> StorageRisk { StorageSafety.risk(for: node.url) }
+
+    /// Shares the footer line with the result of a removal. Both answer "what just
+    /// happened", there is only ever one most-recent answer, and a refusal that
+    /// appeared somewhere else would be a second status area nobody is looking at.
+    func note(_ text: String) { lastAction = text }
 
     /// The worst thing in the selection decides how loudly the sheet talks.
     var selectionRisk: StorageRisk {
@@ -332,6 +415,7 @@ final class StorageModel {
         }
 
         tree = tree?.removing(gone)
+        caches = tree.map(CacheSurvey.init(of:))
         collector.removeAll()
         lastAction = failed == 0
             ? "Moved \(humanBytes(moved)) to the Trash. Empty it to get the space back."

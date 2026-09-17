@@ -141,11 +141,54 @@ public enum VolumeLedger {
     public static func space(at url: URL) -> Space? {
         let keys: Set<URLResourceKey> = [.volumeTotalCapacityKey,
                                          .volumeAvailableCapacityForImportantUsageKey]
-        guard let values = try? url.resourceValues(forKeys: keys),
+        // Rebuilt rather than used as given, because `URL` caches resource
+        // values on its reference-typed backing and the cache survives being
+        // passed by value. A caller that keeps one URL — which is what anything
+        // watching free space over time does — gets its first answer back
+        // forever otherwise, measured unchanged across 384 MB landing on the
+        // volume. A frozen number that looks live is the one wrong answer a
+        // disk tool must not give.
+        let uncached = URL(fileURLWithPath: url.path)
+        guard let values = try? uncached.resourceValues(forKeys: keys),
               let capacity = values.volumeTotalCapacity,
               let free = values.volumeAvailableCapacityForImportantUsage
         else { return nil }
         return Space(capacity: Int64(capacity), free: min(free, Int64(capacity)))
+    }
+
+    /// The volume a path actually sits on, named the way `diskutil` names it.
+    ///
+    /// `statfs` rather than the mount point, because macOS firmlinks the data
+    /// volume into `/` — the home folder appears under `/Users` while living on
+    /// a different volume, and matching by path prefix would ask about the
+    /// wrong one.
+    public static func device(at url: URL) -> String? {
+        var fs = statfs()
+        guard statfs(url.path, &fs) == 0 else { return nil }
+        let name = withUnsafePointer(to: fs.f_mntfromname) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
+            }
+        }
+        let device = name.hasPrefix("/dev/") ? String(name.dropFirst(5)) : name
+        return isDeviceIdentifier(device) ? device : nil
+    }
+
+    /// Snapshots holding the blocks of the volume `url` is on.
+    ///
+    /// While one exists the kernel reports a private size of zero for every file
+    /// older than it, because deleting such a file genuinely frees nothing until
+    /// the snapshot goes. Those zeros are correct, and they are also the whole
+    /// of what the scan can show — so the app needs this to explain them rather
+    /// than present a volume that reclaims nothing.
+    ///
+    /// Purgeable ones count. That flag says macOS may drop the snapshot itself
+    /// when space runs short; it says nothing about the blocks being pinned in
+    /// the meantime, and a purgeable snapshot was measured zeroing private sizes
+    /// exactly as a durable one does.
+    public static func snapshotsPinning(_ url: URL) -> [Snapshot] {
+        guard let device = device(at: url) else { return [] }
+        return (try? snapshots(of: device)) ?? []
     }
 
     public static func purgeableBytes(at url: URL) -> Int64? {

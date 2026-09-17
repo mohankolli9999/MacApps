@@ -66,8 +66,6 @@ import ReclaimCore
     runVolumeSpaceTests(t)
     runByteFormatTests(t)
     runAccessProbeTests(t)
-    runLicenseTests(t)
-    runEntitlementTests(t)
     await runAsyncValidatorTests(t)
     await runConcurrentScanTests(t)
     await runOffVolumeTests(t)

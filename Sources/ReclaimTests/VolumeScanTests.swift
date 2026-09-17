@@ -105,6 +105,38 @@ private final class Collector: @unchecked Sendable {
                  "nothing is still marked as measuring once the scan returns")
     }
 
+    // A tree whose whole mass hangs under one top-level directory is the shape
+    // that splitting at the root cannot divide at all, and the shape a work
+    // queue has to get right at every level rather than only at the top.
+    // Comparing whole subtrees is what separates the two: a walk that files
+    // bytes under the wrong parent still reaches the right grand total, so the
+    // root-level checks above pass and the treemap is wrong anyway.
+    do {
+        let root = makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var chain = root.appendingPathComponent("only")
+        for depth in 0 ..< 8 {
+            chain = chain.appendingPathComponent("d\(depth)")
+            write(90_000 + 7_000 * depth, to: chain.appendingPathComponent("held.bin"))
+        }
+        for fan in 0 ..< 12 {
+            write(30_000 + 1_100 * fan,
+                  to: root.appendingPathComponent("only/wide/w\(fan)/leaf.bin"))
+        }
+
+        func shape(_ node: StorageNode, _ depth: Int) -> [String] {
+            let line = String(repeating: "  ", count: depth)
+                + "\(node.name) \(node.physicalBytes) \(node.reclaimableBytes) \(node.unlistedBytes)"
+            return [line] + node.children.flatMap { shape($0, depth + 1) }
+        }
+
+        let serial = try! VolumeScanner.scan(root, listThreshold: 100_000)
+        let concurrent = try! await VolumeScanner.scanConcurrently(root, listThreshold: 100_000)
+        t.equal(shape(concurrent.root, 0), shape(serial.root, 0),
+                "the parallel walk builds the same subtrees, not just the same total")
+    }
+
     // Every branch that lands is announced. Parallelism that still only speaks
     // at the end buys speed and shows nothing for it.
     do {
@@ -609,7 +641,15 @@ private final class Collector: @unchecked Sendable {
     defer {
         unmount(mountpoint, image: image)
         try? FileManager.default.removeItem(at: mountpoint)
+        FileSpace.volumeAccounting = [:]
     }
+
+    // The reading has to be established before the walk, because nothing about
+    // an individual file on this volume says the zeroes are meaningless — that
+    // is a property of the filesystem, and asking it is the only way to know.
+    t.expect(!FileSpace.clonesFiles(at: mountpoint.path),
+             "HFS+ does not claim the clone capability")
+    FileSpace.record(volumeAt: mountpoint, snapshotted: false)
 
     let file = mountpoint.appendingPathComponent("sample.bin")
     write(64 << 10, to: file)

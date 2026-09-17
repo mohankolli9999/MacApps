@@ -45,9 +45,8 @@ public struct ManifestStore: Sendable {
     public init(url: URL) { self.url = url }
 
     /// The one log the app and the CLI both write to. Naming it here rather than
-    /// spelling the path at each call site: the log is the restore record *and*
-    /// the trial ledger, so a site that drifts loses a way back and gives the app
-    /// away at the same time.
+    /// spelling the path at each call site: a site that drifts writes its
+    /// restores somewhere nothing reads, which costs the user a way back.
     public static var standard: ManifestStore {
         let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
