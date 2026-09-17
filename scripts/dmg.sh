@@ -25,4 +25,9 @@ hdiutil create \
     -ov -format UDZO \
     "$DMG" >/dev/null
 
+# The download page serves this same-origin, under a version-free name so the
+# button never has to be re-pointed. Committed to web/ because Vercel's git
+# integration only deploys what is tracked.
+cp "$DMG" "$ROOT/web/DiskReclaim.dmg"
+
 echo "$DMG"
