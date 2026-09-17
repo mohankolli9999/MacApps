@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disk Reclaim — see what's filling your Mac</title>
+<meta name="description" content="Find what is filling this Mac, and remove only what you choose. No networking, no telemetry — everything stays on your Mac.">
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --line: #30363d;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --accent: #4493f8;
+    --accent-ink: #ffffff;
+    --warn-bg: #21262d;
+    --warn-line: #9e6a03;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 80px 0 56px; text-align: center; }
+  h1 { font-size: 44px; line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em; }
+  .tag { font-size: 20px; color: var(--muted); margin: 0 auto 36px; max-width: 30ch; }
+  .cta {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--accent-ink);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 17px;
+    padding: 14px 28px;
+    border-radius: 10px;
+    transition: filter .15s ease;
+  }
+  .cta:hover { filter: brightness(1.1); }
+  .req { margin-top: 14px; font-size: 14px; color: var(--muted); }
+  section { padding: 32px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 22px; margin: 0 0 18px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } h1 { font-size: 34px; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  .steps { counter-reset: step; list-style: none; padding: 0; margin: 0; }
+  .steps li { position: relative; padding: 0 0 14px 40px; }
+  .steps li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: 0;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--line);
+    color: var(--ink); font-size: 14px; font-weight: 600;
+    display: grid; place-items: center;
+  }
+  .note {
+    background: var(--warn-bg);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--warn-line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 15px;
+    color: var(--muted);
+    margin-bottom: 22px;
+  }
+  kbd {
+    background: #010409; border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ink);
+  }
+  footer { padding: 40px 0 60px; color: var(--muted); font-size: 14px; text-align: center; border-top: 1px solid var(--line); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Disk Reclaim</h1>
+    <p class="tag">Find what is filling this Mac, and remove only what you choose.</p>
+    <a class="cta" href="https://github.com/mohankolli9999/MacApps/releases/latest/download/DiskReclaim-0.1.0.dmg">Download for macOS</a>
+    <p class="req">Requires macOS 14 (Sonoma) or later · Apple Silicon &amp; Intel · 2.3 MB</p>
+  </header>
+
+  <section>
+    <h2>What it does</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Exact bytes, not estimates</h3>
+        <p>Walks the disk and counts the blocks each file actually occupies, largest first — so the sizes you act on are real.</p>
+      </div>
+      <div class="card">
+        <h3>Nothing leaves your Mac</h3>
+        <p>No networking code, no telemetry, no update check. What it reads about your disk is never uploaded or reported anywhere.</p>
+      </div>
+      <div class="card">
+        <h3>A proven way back</h3>
+        <p>Files you pick are moved to the Trash, not erased. Every removal records how it comes back before anything is touched.</p>
+      </div>
+      <div class="card">
+        <h3>You choose everything</h3>
+        <p>Nothing goes without you choosing it. Anything without a safe, recorded way to restore it is left where it is.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>First launch</h2>
+    <div class="note">
+      Disk Reclaim isn't yet notarized by Apple, so macOS asks you to confirm the
+      first time you open it. This is a one-time step — after that it opens normally.
+    </div>
+    <ol class="steps">
+      <li>Open the downloaded <kbd>.dmg</kbd> and drag <strong>Disk Reclaim</strong> into your <strong>Applications</strong> folder.</li>
+      <li>Try to open it. macOS says it "cannot be checked for malicious software" — that's expected for an app this new.</li>
+      <li>Open <strong>System Settings › Privacy &amp; Security</strong>, scroll down, and click <strong>Open Anyway</strong> next to Disk Reclaim.</li>
+      <li>Confirm once more. From then on it launches with a normal double-click.</li>
+    </ol>
+  </section>
+
+  <footer>
+    <p>Disk Reclaim is free and open source · <a href="https://github.com/mohankolli9999/MacApps">Source on GitHub</a></p>
+  </footer>
+</div>
+</body>
+</html>
