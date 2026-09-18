@@ -18,6 +18,27 @@ Requires **macOS 14 (Sonoma) or later** · Apple Silicon & Intel.
 
 ---
 
+## Quickstart — build & run from source
+
+The simplest way to run Disk Reclaim without any Gatekeeper prompts. Requires
+**Xcode 16+** (or the matching Swift 6 toolchain) on macOS 14+.
+
+```bash
+git clone https://github.com/mohankolli9999/MacApps.git
+cd MacApps
+scripts/bundle.sh release      # builds and assembles DiskReclaim.app
+open .build/DiskReclaim.app
+```
+
+A locally built app is not quarantined, so macOS opens it without the "Apple
+could not verify…" dialog you get from a downloaded, un-notarized build. On
+first launch it will ask for **Full Disk Access** (System Settings → Privacy &
+Security) so it can measure the whole volume.
+
+No Xcode? Use the downloadable build below instead.
+
+---
+
 ## Install
 
 1. Download the latest `DiskReclaim.dmg` from
