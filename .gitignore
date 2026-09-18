@@ -3,3 +3,9 @@
 .swiftpm/
 DerivedData/
 *.xcuserstate
+
+# The licence signing key. Anyone holding it can mint licences, so it lives
+# outside the repo (~/.diskreclaim-signing.key) — this only catches a slip.
+*.signing.key
+*-signing.key
+.diskreclaim-signing.key
