@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Disk Reclaim — see what's filling your Mac</title>
 <meta name="description" content="Disk Reclaim maps every byte on your Mac and reclaims only what you choose. No networking, no telemetry, and nothing is erased without a way back.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='5' fill='%231b2130'/><rect x='3' y='3' width='10.5' height='11' rx='2' fill='%2333405a'/><rect x='15' y='3' width='6' height='6.5' rx='2' fill='%233a4760'/><rect x='15' y='11' width='6' height='10' rx='2' fill='%23e58a47'/><rect x='3' y='15.5' width='10.5' height='5.5' rx='2' fill='%23e4673c'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -35,10 +36,36 @@
     line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+  /* Atmosphere: warmth bleeding from the treemap, a cool cast behind the headline */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(46% 40% at 80% 16%, rgba(228,103,60,.13), transparent 68%),
+      radial-gradient(42% 34% at 8% 4%, rgba(96,124,196,.07), transparent 70%);
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; position: relative; z-index: 1; }
+  section, .hero { scroll-margin-top: 84px; }
+
+  /* ---------- Sticky header ---------- */
+  .nav {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: 1120px; margin: 0 auto; padding: 14px 28px;
+    transition: background .2s ease, border-color .2s ease, backdrop-filter .2s ease;
+    border-bottom: 1px solid transparent;
+  }
+  .nav.scrolled { background: rgba(19,23,34,.72); backdrop-filter: blur(12px); border-bottom-color: var(--line); }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 16px; letter-spacing: -0.01em; }
+  .brand svg { width: 22px; height: 22px; border-radius: 5px; }
+  .nav-links { display: flex; align-items: center; gap: 26px; }
+  .nav-links a { color: var(--muted); text-decoration: none; font-size: 14.5px; transition: color .12s ease; }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-links a.gh { color: var(--ink); border: 1px solid var(--line); padding: 7px 14px; border-radius: 9px; }
+  .nav-links a.gh:hover { border-color: #3a4453; }
+  @media (max-width: 720px) { .nav-links a:not(.gh) { display: none; } }
 
   /* ---------- Hero ---------- */
-  .hero { padding: 76px 0 40px; display: grid; grid-template-columns: 1fr 1.15fr; gap: 56px; align-items: center; }
+  .hero { padding: 56px 0 44px; display: grid; grid-template-columns: 1fr 1.15fr; gap: 56px; align-items: center; }
   .lede h1 {
     font-size: clamp(38px, 5vw, 60px);
     line-height: 1.02;
@@ -88,13 +115,18 @@
   .dot { width: 11px; height: 11px; border-radius: 50%; background: #313a4b; }
   .map-title { margin-left: 10px; font-size: 12px; color: var(--faint); font-family: var(--mono); }
   .treemap { width: 100%; height: auto; display: block; border-radius: 8px; overflow: hidden; }
-  .tile rect { rx: 6; }
+  .tile { cursor: pointer; }
+  .tile rect { rx: 6; stroke: rgba(255,255,255,.05); stroke-width: 1; transition: filter .16s ease; }
+  .tile:hover rect { filter: brightness(1.09); }
   .tile .t-name { font-size: 15px; font-weight: 500; }
   .tile .t-size { font-family: var(--mono); font-size: 13px; }
   .tile.sm .t-name { font-size: 13px; }
   .tile.sm .t-size { font-size: 11px; }
-  .legend { display: flex; align-items: center; gap: 10px; padding: 12px 10px 4px; font-size: 13px; color: var(--faint); }
-  .legend .swatch { width: 46px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--keep), var(--warm-1), var(--warm-3)); }
+  .map-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 10px 4px; font-size: 13px; color: var(--faint); }
+  .map-summary .lg { display: inline-flex; align-items: center; gap: 9px; }
+  .map-summary .swatch { width: 46px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--keep), var(--warm-1), var(--warm-3)); }
+  .map-summary .total { font-size: 13.5px; color: var(--muted); }
+  .map-summary .total b { font-family: var(--mono); color: var(--warm-1); font-weight: 500; }
 
   /* ---------- Sections ---------- */
   section { padding: 60px 0; border-top: 1px solid var(--line); }
@@ -146,9 +178,21 @@
 </style>
 </head>
 <body>
+<nav class="nav" id="nav">
+  <a class="brand" href="#top">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="24" height="24" rx="5" fill="#1b2130"/><rect x="3" y="3" width="10.5" height="11" rx="2" fill="#33405a"/><rect x="15" y="3" width="6" height="6.5" rx="2" fill="#3a4760"/><rect x="15" y="11" width="6" height="10" rx="2" fill="#e58a47"/><rect x="3" y="15.5" width="10.5" height="5.5" rx="2" fill="#e4673c"/></svg>
+    Disk Reclaim
+  </a>
+  <div class="nav-links">
+    <a href="#how">How it works</a>
+    <a href="#trust">Trust</a>
+    <a href="#download">Download</a>
+    <a class="gh" href="https://github.com/mohankolli9999/MacApps">GitHub</a>
+  </div>
+</nav>
 <div class="wrap">
 
-  <header class="hero">
+  <header class="hero" id="top">
     <div class="lede">
       <h1>Know exactly what's filling your Mac.</h1>
       <p class="sub">Disk Reclaim maps every byte on your disk and reclaims only what
@@ -194,8 +238,8 @@
         </g>
 
         <!-- reclaimable tiles (warm scale, dark ink) -->
-        <g class="tile" style="animation-delay:.10s" filter="url(#glow)">
-          <rect x="6" y="306" width="328" height="308" fill="#e4673c"/>
+        <g class="tile" style="animation-delay:.10s">
+          <rect x="6" y="306" width="328" height="308" fill="#e4673c" filter="url(#glow)"/>
           <text class="t-name" x="26" y="336" fill="#241304">Xcode DerivedData</text>
           <text class="t-size" x="26" y="358" fill="#4a2410">31.6 GB · reclaimable</text>
         </g>
@@ -237,7 +281,10 @@
           <text class="t-size" x="824" y="594" fill="#4a2410">3.1 GB</text>
         </g>
       </svg>
-      <div class="legend"><span class="swatch"></span> Warmer tiles are space you can safely reclaim</div>
+      <div class="map-summary">
+        <span class="lg"><span class="swatch"></span> warmer = safe to reclaim</span>
+        <span class="total"><b>≈ 88 GB</b> reclaimable</span>
+      </div>
     </div>
   </header>
 
@@ -332,6 +379,12 @@
         setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1800);
       });
     });
+    var nav = document.getElementById('nav');
+    if (nav) {
+      var onScroll = function () { nav.classList.toggle('scrolled', window.scrollY > 8); };
+      onScroll();
+      window.addEventListener('scroll', onScroll, { passive: true });
+    }
   })();
 </script>
 </body>
