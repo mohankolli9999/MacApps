@@ -4,129 +4,290 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Disk Reclaim — see what's filling your Mac</title>
-<meta name="description" content="Find what is filling this Mac, and remove only what you choose. No networking, no telemetry — everything stays on your Mac.">
+<meta name="description" content="Disk Reclaim maps every byte on your Mac and reclaims only what you choose. No networking, no telemetry, and nothing is erased without a way back.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0d1117;
-    --panel: #161b22;
-    --line: #30363d;
-    --ink: #e6edf3;
-    --muted: #8b949e;
-    --accent: #4493f8;
-    --accent-ink: #ffffff;
-    --warn-bg: #21262d;
-    --warn-line: #9e6a03;
+    --bg: #131722;
+    --bg-2: #171C28;
+    --surface: #1B2130;
+    --line: #29313f;
+    --ink: #eef1f6;
+    --muted: #949db0;
+    --faint: #6b7386;
+    --keep: #202839;
+    --warm-1: #ebb157;
+    --warm-2: #e58a47;
+    --warm-3: #e4673c;
+    --warm-ink: #241304;
+    --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "Geist", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
     margin: 0;
-    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-family: var(--sans);
     background: var(--bg);
     color: var(--ink);
+    line-height: 1.55;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
-  header { padding: 80px 0 56px; text-align: center; }
-  h1 { font-size: 44px; line-height: 1.1; margin: 0 0 12px; letter-spacing: -0.02em; }
-  .tag { font-size: 20px; color: var(--muted); margin: 0 auto 36px; max-width: 30ch; }
-  .cta {
-    display: inline-block;
-    background: var(--accent);
-    color: var(--accent-ink);
-    text-decoration: none;
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+
+  /* ---------- Hero ---------- */
+  .hero { padding: 76px 0 40px; display: grid; grid-template-columns: 1fr 1.15fr; gap: 56px; align-items: center; }
+  .lede h1 {
+    font-size: clamp(38px, 5vw, 60px);
+    line-height: 1.02;
+    letter-spacing: -0.025em;
     font-weight: 600;
-    font-size: 17px;
-    padding: 14px 28px;
-    border-radius: 10px;
-    transition: filter .15s ease;
+    margin: 0 0 20px;
   }
-  .cta:hover { filter: brightness(1.1); }
-  .req { margin-top: 14px; font-size: 14px; color: var(--muted); }
-  section { padding: 32px 0; border-top: 1px solid var(--line); }
-  h2 { font-size: 22px; margin: 0 0 18px; }
-  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
-  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } h1 { font-size: 34px; } }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
-  .card h3 { margin: 0 0 6px; font-size: 16px; }
-  .card p { margin: 0; color: var(--muted); font-size: 15px; }
-  .steps { counter-reset: step; list-style: none; padding: 0; margin: 0; }
-  .steps li { position: relative; padding: 0 0 14px 40px; }
-  .steps li::before {
-    counter-increment: step; content: counter(step);
-    position: absolute; left: 0; top: 0;
-    width: 26px; height: 26px; border-radius: 50%;
-    background: var(--panel); border: 1px solid var(--line);
-    color: var(--ink); font-size: 14px; font-weight: 600;
+  .lede p.sub { font-size: 19px; color: var(--muted); max-width: 46ch; margin: 0 0 32px; }
+  .actions { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .cta {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: var(--ink); color: #10141c;
+    text-decoration: none; font-weight: 600; font-size: 16px;
+    padding: 14px 24px; border-radius: 12px;
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .cta:hover { transform: translateY(-1px); box-shadow: 0 10px 30px -12px rgba(0,0,0,.7); }
+  .cta svg { width: 17px; height: 17px; }
+  .ghost { color: var(--muted); text-decoration: none; font-size: 15px; font-weight: 500; border-bottom: 1px solid var(--line); padding-bottom: 2px; }
+  .ghost:hover { color: var(--ink); }
+  .meta { margin: 22px 0 0; font-size: 14px; color: var(--faint); }
+  .meta b { color: var(--muted); font-weight: 500; }
+
+  /* ---------- Treemap ---------- */
+  .map-frame {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 12px;
+    box-shadow: 0 40px 80px -40px rgba(0,0,0,.7);
+  }
+  .map-bar { display: flex; align-items: center; gap: 7px; padding: 6px 8px 12px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #313a4b; }
+  .map-title { margin-left: 10px; font-size: 12px; color: var(--faint); font-family: var(--mono); }
+  .treemap { width: 100%; height: auto; display: block; border-radius: 8px; overflow: hidden; }
+  .tile rect { rx: 6; }
+  .tile .t-name { font-size: 15px; font-weight: 500; }
+  .tile .t-size { font-family: var(--mono); font-size: 13px; }
+  .tile.sm .t-name { font-size: 13px; }
+  .tile.sm .t-size { font-size: 11px; }
+  .legend { display: flex; align-items: center; gap: 10px; padding: 12px 10px 4px; font-size: 13px; color: var(--faint); }
+  .legend .swatch { width: 46px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--keep), var(--warm-1), var(--warm-3)); }
+
+  /* ---------- Sections ---------- */
+  section { padding: 60px 0; border-top: 1px solid var(--line); }
+  .eyebrow { font-size: 13px; color: var(--warm-2); font-weight: 500; margin: 0 0 12px; }
+  h2 { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .section-intro { color: var(--muted); max-width: 60ch; margin: 0 0 40px; font-size: 17px; }
+
+  /* Flow (earned numbering — it is a real sequence) */
+  .flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .step { background: var(--surface); padding: 28px 26px 30px; }
+  .step .n { font-family: var(--mono); font-size: 13px; color: var(--warm-2); }
+  .step h3 { font-size: 19px; font-weight: 600; margin: 14px 0 8px; }
+  .step p { color: var(--muted); font-size: 15px; margin: 0; }
+
+  /* Trust — two substantial statements, not identical cards */
+  .trust { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
+  .trust h3 { font-size: 21px; font-weight: 600; margin: 0 0 10px; }
+  .trust p { color: var(--muted); margin: 0; max-width: 42ch; }
+  .trust .rule { width: 34px; height: 2px; background: var(--warm-3); margin-bottom: 20px; }
+
+  /* First launch */
+  .launch-note { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--warm-2); border-radius: 10px; padding: 16px 18px; color: var(--muted); font-size: 15px; margin-bottom: 26px; max-width: 66ch; }
+  ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 0; max-width: 66ch; }
+  ol.steps li { position: relative; padding: 0 0 16px 42px; color: var(--muted); }
+  ol.steps li strong { color: var(--ink); font-weight: 500; }
+  ol.steps li::before {
+    counter-increment: s; content: counter(s);
+    position: absolute; left: 0; top: -1px;
+    width: 27px; height: 27px; border-radius: 8px;
+    background: var(--bg-2); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 13px; color: var(--ink);
     display: grid; place-items: center;
   }
-  .note {
-    background: var(--warn-bg);
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--warn-line);
-    border-radius: 8px;
-    padding: 14px 16px;
-    font-size: 15px;
-    color: var(--muted);
-    margin-bottom: 22px;
+  code { background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; font-family: var(--mono); font-size: 13px; color: var(--ink); }
+
+  footer { padding: 46px 0 64px; border-top: 1px solid var(--line); color: var(--faint); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  footer a { color: var(--muted); }
+
+  /* ---------- Motion: one orchestrated reveal ---------- */
+  .tile { opacity: 0; transform: scale(.965); transform-box: fill-box; transform-origin: center; animation: rise .5s cubic-bezier(.2,.7,.3,1) forwards; }
+  @keyframes rise { to { opacity: 1; transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { .tile { animation: none; opacity: 1; transform: none; } .cta { transition: none; } }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 52px; }
+    .flow { grid-template-columns: 1fr; }
+    .trust { grid-template-columns: 1fr; gap: 32px; }
   }
-  kbd {
-    background: #010409; border: 1px solid var(--line); border-radius: 5px;
-    padding: 1px 6px; font: 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--ink);
-  }
-  footer { padding: 40px 0 60px; color: var(--muted); font-size: 14px; text-align: center; border-top: 1px solid var(--line); }
-  a { color: var(--accent); }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>Disk Reclaim</h1>
-    <p class="tag">Find what is filling this Mac, and remove only what you choose.</p>
-    <a class="cta" href="DiskReclaim.dmg" download>Download for macOS</a>
-    <p class="req">Requires macOS 14 (Sonoma) or later · Apple Silicon &amp; Intel · 2.3 MB<br>
-      <a href="https://github.com/mohankolli9999/MacApps/releases/latest">or get it from GitHub Releases</a></p>
+
+  <header class="hero">
+    <div class="lede">
+      <h1>Know exactly what's filling your Mac.</h1>
+      <p class="sub">Disk Reclaim maps every byte on your disk and reclaims only what
+        you choose. Nothing leaves your Mac, and nothing is erased without a way back.</p>
+      <div class="actions">
+        <a class="cta" href="DiskReclaim.dmg" download>
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1v9m0 0 3.2-3.2M8 10 4.8 6.8M2 12v1.5A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V12" stroke="#10141c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Download for macOS
+        </a>
+        <a class="ghost" href="https://github.com/mohankolli9999/MacApps#quickstart--build--run-from-source">or build from source</a>
+      </div>
+      <p class="meta"><b>Free</b> · macOS 14 (Sonoma) or later · Apple Silicon &amp; Intel · 2.3 MB</p>
+    </div>
+
+    <div class="map-frame" aria-hidden="true">
+      <div class="map-bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="map-title">~ / Macintosh HD — 512 GB</span>
+      </div>
+      <svg class="treemap" viewBox="0 0 1000 620" role="img" aria-label="A treemap of disk usage. Warmer tiles are space you can safely reclaim.">
+        <defs>
+          <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="0" stdDeviation="10" flood-color="#e4673c" flood-opacity="0.55"/>
+          </filter>
+        </defs>
+
+        <!-- keep tiles (cool graphite) -->
+        <g class="tile" style="animation-delay:.02s">
+          <rect x="6" y="6" width="548" height="288" fill="#212a39"/>
+          <text class="t-name" x="26" y="36" fill="#eef1f6">System Data</text>
+          <text class="t-size" x="26" y="58" fill="#949db0">48.2 GB</text>
+        </g>
+        <g class="tile" style="animation-delay:.06s">
+          <rect x="566" y="6" width="428" height="168" fill="#1b2230"/>
+          <text class="t-name" x="586" y="36" fill="#eef1f6">Photos Library</text>
+          <text class="t-size" x="586" y="58" fill="#949db0">40.1 GB</text>
+        </g>
+
+        <!-- reclaimable tiles (warm scale, dark ink) -->
+        <g class="tile" style="animation-delay:.10s" filter="url(#glow)">
+          <rect x="6" y="306" width="328" height="308" fill="#e4673c"/>
+          <text class="t-name" x="26" y="336" fill="#241304">Xcode DerivedData</text>
+          <text class="t-size" x="26" y="358" fill="#4a2410">31.6 GB · reclaimable</text>
+        </g>
+        <g class="tile" style="animation-delay:.14s">
+          <rect x="346" y="306" width="208" height="176" fill="#e58a47"/>
+          <text class="t-name" x="366" y="336" fill="#241304">Docker.raw</text>
+          <text class="t-size" x="366" y="358" fill="#4a2410">22.4 GB</text>
+        </g>
+        <g class="tile" style="animation-delay:.18s">
+          <rect x="566" y="186" width="252" height="230" fill="#e7a24e"/>
+          <text class="t-name" x="586" y="216" fill="#241304">Downloads</text>
+          <text class="t-size" x="586" y="238" fill="#4a2410">12.3 GB</text>
+        </g>
+
+        <!-- smaller tiles -->
+        <g class="tile sm" style="animation-delay:.22s">
+          <rect x="346" y="494" width="208" height="120" fill="#ebb157"/>
+          <text class="t-name" x="366" y="522" fill="#241304">Caches</text>
+          <text class="t-size" x="366" y="542" fill="#4a2410">9.7 GB</text>
+        </g>
+        <g class="tile sm" style="animation-delay:.26s">
+          <rect x="830" y="186" width="164" height="230" fill="#e8924a"/>
+          <text class="t-name" x="848" y="214" fill="#241304">node_modules</text>
+          <text class="t-size" x="848" y="234" fill="#4a2410">8.9 GB</text>
+        </g>
+        <g class="tile sm" style="animation-delay:.30s">
+          <rect x="566" y="428" width="228" height="186" fill="#1f2734"/>
+          <text class="t-name" x="586" y="456" fill="#eef1f6">Mail</text>
+          <text class="t-size" x="586" y="476" fill="#949db0">6.2 GB</text>
+        </g>
+        <g class="tile sm" style="animation-delay:.34s">
+          <rect x="806" y="428" width="188" height="104" fill="#273143"/>
+          <text class="t-name" x="824" y="456" fill="#c3cad8">Local snapshots</text>
+          <text class="t-size" x="824" y="476" fill="#6b7386">frees on expiry</text>
+        </g>
+        <g class="tile sm" style="animation-delay:.38s">
+          <rect x="806" y="544" width="188" height="70" fill="#e9743f"/>
+          <text class="t-name" x="824" y="574" fill="#241304">Trash</text>
+          <text class="t-size" x="824" y="594" fill="#4a2410">3.1 GB</text>
+        </g>
+      </svg>
+      <div class="legend"><span class="swatch"></span> Warmer tiles are space you can safely reclaim</div>
+    </div>
   </header>
 
-  <section>
-    <h2>What it does</h2>
-    <div class="grid">
-      <div class="card">
-        <h3>Exact bytes, not estimates</h3>
-        <p>Walks the disk and counts the blocks each file actually occupies, largest first — so the sizes you act on are real.</p>
+  <section id="how">
+    <p class="eyebrow">How it works</p>
+    <h2>Scan, choose, reclaim.</h2>
+    <p class="section-intro">Three steps, and you stay in control of every one. Disk
+      Reclaim never removes anything on its own.</p>
+    <div class="flow">
+      <div class="step">
+        <span class="n">01</span>
+        <h3>Scan</h3>
+        <p>It walks the disk and counts the blocks each file actually occupies —
+          exact bytes, largest first, drawn as a live treemap.</p>
       </div>
-      <div class="card">
-        <h3>Nothing leaves your Mac</h3>
-        <p>No networking code, no telemetry, no update check. What it reads about your disk is never uploaded or reported anywhere.</p>
+      <div class="step">
+        <span class="n">02</span>
+        <h3>Choose</h3>
+        <p>You pick what to remove. Anything without a proven way back is marked
+          and left in place, so you can't strand yourself.</p>
       </div>
-      <div class="card">
-        <h3>A proven way back</h3>
-        <p>Files you pick are moved to the Trash, not erased. Every removal records how it comes back before anything is touched.</p>
-      </div>
-      <div class="card">
-        <h3>You choose everything</h3>
-        <p>Nothing goes without you choosing it. Anything without a safe, recorded way to restore it is left where it is.</p>
+      <div class="step">
+        <span class="n">03</span>
+        <h3>Reclaim</h3>
+        <p>Selected files move to the Trash, not oblivion. Put Back in Finder
+          undoes any of it, any time before you empty it.</p>
       </div>
     </div>
   </section>
 
-  <section>
-    <h2>First launch</h2>
-    <div class="note">
-      Disk Reclaim isn't yet notarized by Apple, so macOS asks you to confirm the
-      first time you open it. This is a one-time step — after that it opens normally.
+  <section id="trust">
+    <p class="eyebrow">Built to be trustworthy</p>
+    <h2>Your disk is nobody's business but yours.</h2>
+    <div class="trust" style="margin-top:36px">
+      <div>
+        <div class="rule"></div>
+        <h3>Nothing leaves your Mac</h3>
+        <p>Disk Reclaim has no networking code at all. What it reads about your
+          disk is never uploaded, shared, or reported — no telemetry, no update
+          ping, nothing to opt out of.</p>
+      </div>
+      <div>
+        <div class="rule"></div>
+        <h3>A proven way back</h3>
+        <p>Before anything is moved, Disk Reclaim records how it comes back. If a
+          file can't be safely restored, it stays put. You are never one click
+          from a mistake you can't undo.</p>
+      </div>
     </div>
+  </section>
+
+  <section id="install">
+    <p class="eyebrow">Opening it the first time</p>
+    <h2>One-time approval on first launch.</h2>
+    <div class="launch-note">This build isn't notarized by Apple yet, so macOS asks
+      you to confirm the first time you open it. It's a one-time step — after that,
+      it launches with a normal double-click.</div>
     <ol class="steps">
-      <li>Open the downloaded <kbd>.dmg</kbd> and drag <strong>Disk Reclaim</strong> into your <strong>Applications</strong> folder.</li>
-      <li>Try to open it. macOS says it "cannot be checked for malicious software" — that's expected for an app this new.</li>
-      <li>Open <strong>System Settings › Privacy &amp; Security</strong>, scroll down, and click <strong>Open Anyway</strong> next to Disk Reclaim.</li>
-      <li>Confirm once more. From then on it launches with a normal double-click.</li>
+      <li>Open the downloaded <code>.dmg</code> and drag <strong>Disk Reclaim</strong> into <strong>Applications</strong>.</li>
+      <li>Try to open it. macOS says it can't be checked for malware — expected for an app this new. Click <strong>Done</strong> (not Move to Trash).</li>
+      <li>Open <strong>System Settings → Privacy &amp; Security</strong>, scroll to Security, and click <strong>Open Anyway</strong> next to Disk Reclaim.</li>
+      <li>Confirm once more. Prefer the terminal? Run <code>xattr -dr com.apple.quarantine /Applications/DiskReclaim.app</code> and it opens straight away.</li>
     </ol>
   </section>
 
   <footer>
-    <p>Disk Reclaim is free and open source · <a href="https://github.com/mohankolli9999/MacApps">Source on GitHub</a></p>
+    <span>Disk Reclaim is free and open source.</span>
+    <span><a href="https://github.com/mohankolli9999/MacApps">Source on GitHub</a> · <a href="https://github.com/mohankolli9999/MacApps/releases/latest">All releases</a></span>
   </footer>
+
 </div>
 </body>
 </html>
