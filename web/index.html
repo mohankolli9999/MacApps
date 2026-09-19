@@ -47,20 +47,22 @@
   a { color: inherit; }
   :focus-visible { outline: 2px solid var(--warm-2); outline-offset: 3px; border-radius: 4px; }
 
-  /* Atmosphere: warm bleed from the treemap, a cool cast behind the headline,
-     a matte grain, and an edge vignette — depth without a single flat wash. */
+  /* Atmosphere: a living aurora of warm "reclaim" light and a cool cast behind
+     the headline, drifting slowly so the whole canvas feels alive; over it an
+     edge vignette and a matte grain — depth without a single flat wash. */
   .atmos { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
-  .atmos::before {
-    content: ""; position: absolute; inset: 0;
-    background:
-      radial-gradient(52% 44% at 82% 12%, rgba(228,92,54,.16), transparent 66%),
-      radial-gradient(44% 38% at 6% 2%, rgba(92,124,224,.10), transparent 70%),
-      radial-gradient(60% 50% at 50% 108%, rgba(236,138,69,.06), transparent 70%);
-  }
   .atmos::after {
     content: ""; position: absolute; inset: 0;
-    background: radial-gradient(120% 90% at 50% 30%, transparent 55%, rgba(0,0,0,.55));
+    background: radial-gradient(120% 90% at 50% 30%, transparent 55%, rgba(0,0,0,.6));
   }
+  .aurora { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+  .aurora .blob { position: absolute; border-radius: 50%; filter: blur(90px); will-change: transform; }
+  .aurora .warm  { width: 48vw; height: 48vw; top: -14%; right: -8%;  background: radial-gradient(circle at 50% 50%, rgba(228,92,54,.42), transparent 62%); animation: drift-a 28s ease-in-out infinite alternate; }
+  .aurora .ember { width: 40vw; height: 40vw; bottom: -18%; left: 26%; background: radial-gradient(circle at 50% 50%, rgba(236,138,69,.30), transparent 64%); animation: drift-b 34s ease-in-out infinite alternate; }
+  .aurora .cool  { width: 44vw; height: 44vw; top: -12%; left: -14%;  background: radial-gradient(circle at 50% 50%, rgba(92,124,224,.24), transparent 66%); animation: drift-c 31s ease-in-out infinite alternate; }
+  @keyframes drift-a { from { transform: translate3d(0,0,0) scale(1); }    to { transform: translate3d(-6vw, 6vh, 0) scale(1.12); } }
+  @keyframes drift-b { from { transform: translate3d(0,0,0) scale(1); }    to { transform: translate3d(7vw, -5vh, 0) scale(1.15); } }
+  @keyframes drift-c { from { transform: translate3d(0,0,0) scale(1.05); } to { transform: translate3d(5vw, 7vh, 0) scale(.92); } }
   .grain {
     position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: .04;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -100,6 +102,7 @@
 
   /* ---------- Hero ---------- */
   .hero {
+    position: relative;
     padding: 64px 0 72px;
     display: grid; grid-template-columns: 1fr 1.18fr; gap: 60px; align-items: center;
     perspective: 1400px;
@@ -107,6 +110,21 @@
   /* Let grid tracks shrink so the terminal's pre-formatted line scrolls
      internally instead of forcing horizontal overflow. */
   .hero > * { min-width: 0; }
+  .lede, .tm-card { position: relative; z-index: 2; }
+
+  /* Interactive spotlight grid — a faint lattice that only lights up around the
+     pointer, so the empty canvas responds to you without ever competing. */
+  .hero-grid {
+    position: absolute; inset: -40px 0; z-index: 0; pointer-events: none;
+    opacity: 0; transition: opacity .35s ease;
+    background-image:
+      linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+    background-size: 34px 34px;
+    -webkit-mask: radial-gradient(240px 240px at var(--mx, -999px) var(--my, -999px), #000, transparent 72%);
+            mask: radial-gradient(240px 240px at var(--mx, -999px) var(--my, -999px), #000, transparent 72%);
+  }
+  .hero.spot-on .hero-grid { opacity: 1; }
   .pill {
     display: inline-flex; align-items: center; gap: 9px;
     background: var(--glass); border: 1px solid var(--hair);
@@ -167,6 +185,19 @@
     transform-style: preserve-3d;
     will-change: transform;
   }
+  /* Living border — a warm glint travelling the card edge, like the disk being
+     read around its rim. Drawn as a masked 1px conic ring. */
+  @property --bd { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+  .tm-card::before {
+    content: ""; position: absolute; inset: 0; border-radius: 22px; padding: 1px;
+    background: conic-gradient(from var(--bd), transparent 0deg, rgba(242,182,77,.65) 46deg, rgba(228,92,54,.55) 92deg, transparent 150deg, transparent 360deg);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+            mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    animation: bd-spin 9s linear infinite;
+    pointer-events: none; z-index: 4;
+  }
+  @keyframes bd-spin { to { --bd: 360deg; } }
   .tm-bar { display: flex; align-items: center; gap: 7px; padding: 6px 8px 13px; }
   .dot { width: 11px; height: 11px; border-radius: 50%; background: #313a4b; }
   .tm-title { margin-left: 10px; font-size: 12px; color: var(--faint); font-family: var(--mono); }
@@ -271,6 +302,9 @@
   .tile { opacity: 0; transform: translateY(10px) scale(.975); transform-box: fill-box; transform-origin: center; animation: tileIn .6s cubic-bezier(.2,.75,.25,1) both; }
   @keyframes tileIn { to { opacity: 1; transform: none; } }
 
+  [data-load] { opacity: 0; transform: translateY(16px); animation: loadUp .85s cubic-bezier(.2,.7,.3,1) both; }
+  @keyframes loadUp { to { opacity: 1; transform: none; } }
+
   [data-reveal] { opacity: 0; transform: translateY(18px); transition: opacity .7s cubic-bezier(.2,.7,.3,1), transform .7s cubic-bezier(.2,.7,.3,1); }
   [data-reveal].in { opacity: 1; transform: none; }
 
@@ -279,6 +313,10 @@
     .tile, .pill .dot-live { animation: none !important; opacity: 1 !important; transform: none !important; }
     .scan { display: none !important; }
     [data-reveal] { opacity: 1 !important; transform: none !important; transition: none !important; }
+    [data-load] { animation: none !important; opacity: 1 !important; transform: none !important; }
+    .aurora .blob { animation: none !important; }
+    .tm-card::before { animation: none !important; }
+    .hero-grid { display: none !important; }
     .cta, .step, .nav-links a.gh { transition: none; }
     .tm-card { transform: none !important; }
   }
@@ -293,6 +331,11 @@
 </head>
 <body>
 <div class="atmos" aria-hidden="true"></div>
+<div class="aurora" aria-hidden="true">
+  <span class="blob warm"></span>
+  <span class="blob ember"></span>
+  <span class="blob cool"></span>
+</div>
 <div class="grain" aria-hidden="true"></div>
 
 <nav class="nav" id="nav">
@@ -311,12 +354,13 @@
 <div class="wrap">
 
   <header class="hero" id="top">
+    <div class="hero-grid" aria-hidden="true"></div>
     <div class="lede">
-      <span class="pill"><span class="dot-live"></span> <b>Free &amp; open source</b> · zero telemetry</span>
-      <h1>Know exactly what's filling your Mac.</h1>
-      <p class="sub">Disk Reclaim maps every byte on your disk and reclaims only what
+      <span class="pill" data-load style="animation-delay:.05s"><span class="dot-live"></span> <b>Free &amp; open source</b> · zero telemetry</span>
+      <h1 data-load style="animation-delay:.13s">Know exactly what's filling your Mac.</h1>
+      <p class="sub" data-load style="animation-delay:.22s">Disk Reclaim maps every byte on your disk and reclaims only what
         you choose. Nothing leaves your Mac, and nothing is erased without a way back.</p>
-      <div class="term">
+      <div class="term" data-load style="animation-delay:.31s">
         <div class="term-bar">
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <span class="term-title">build &amp; run</span>
@@ -326,9 +370,9 @@
 <span class="pr">$ </span>cd MacApps &amp;&amp; scripts/bundle.sh release
 <span class="pr">$ </span>open .build/DiskReclaim.app</code></pre>
       </div>
-      <p class="alt">Not a developer? <a href="#download">Download the .dmg</a> — it opens
+      <p class="alt" data-load style="animation-delay:.39s">Not a developer? <a href="#download">Download the .dmg</a> — it opens
         after a one-time approval.</p>
-      <p class="meta"><b>Builds in three commands</b> · needs Xcode 16+ · macOS 14 (Sonoma) or later</p>
+      <p class="meta" data-load style="animation-delay:.46s"><b>Builds in three commands</b> · needs Xcode 16+ · macOS 14 (Sonoma) or later</p>
     </div>
 
     <div class="tm-card" id="tmCard" aria-hidden="true">
@@ -543,20 +587,24 @@
       reveals.forEach(function (el) { io.observe(el); });
     }
 
-    // Cursor parallax on the treemap card — subtle depth, pointer devices only
+    // Cursor parallax on the treemap card + a spotlight that lights the grid,
+    // both pointer-devices only so touch and reduced-motion stay calm.
     var card = document.getElementById('tmCard');
     var hero = document.getElementById('top');
     if (card && hero && !reduce && window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
-      var raf = null, tx = 0, ty = 0;
+      var raf = null, tx = 0, ty = 0, mx = 0, my = 0;
       hero.addEventListener('mousemove', function (e) {
         var r = hero.getBoundingClientRect();
-        tx = ((e.clientX - r.left) / r.width - 0.5);
-        ty = ((e.clientY - r.top) / r.height - 0.5);
+        mx = e.clientX - r.left; my = e.clientY - r.top;
+        tx = (mx / r.width - 0.5); ty = (my / r.height - 0.5);
+        hero.classList.add('spot-on');
         if (!raf) raf = requestAnimationFrame(apply);
       });
-      hero.addEventListener('mouseleave', function () { tx = 0; ty = 0; if (!raf) raf = requestAnimationFrame(apply); });
+      hero.addEventListener('mouseleave', function () { tx = 0; ty = 0; hero.classList.remove('spot-on'); if (!raf) raf = requestAnimationFrame(apply); });
       var apply = function () {
         raf = null;
+        hero.style.setProperty('--mx', mx.toFixed(1) + 'px');
+        hero.style.setProperty('--my', my.toFixed(1) + 'px');
         card.style.transform = 'rotateY(' + (tx * 5).toFixed(2) + 'deg) rotateX(' + (-ty * 5).toFixed(2) + 'deg) translateY(' + (ty * -6).toFixed(1) + 'px)';
       };
     }
