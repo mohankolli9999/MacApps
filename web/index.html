@@ -62,6 +62,20 @@
   .meta { margin: 22px 0 0; font-size: 14px; color: var(--faint); }
   .meta b { color: var(--muted); font-weight: 500; }
 
+  /* Build-from-source terminal (primary action) */
+  .term { background: #0e121b; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 4px 0 16px; }
+  .term-bar { display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .term-title { margin-left: 8px; font-family: var(--mono); font-size: 12px; color: var(--faint); }
+  .copy { margin-left: auto; background: var(--surface); border: 1px solid var(--line); color: var(--muted); font-family: var(--sans); font-size: 12px; padding: 5px 11px; border-radius: 8px; cursor: pointer; transition: color .12s ease, border-color .12s ease; }
+  .copy:hover { color: var(--ink); border-color: #3a4453; }
+  .copy.done { color: var(--warm-1); border-color: var(--warm-2); }
+  .term pre { margin: 0; padding: 16px 18px; overflow-x: auto; }
+  .term code { background: none; border: none; padding: 0; font-family: var(--mono); font-size: 13.5px; color: #dbe2ee; line-height: 1.85; display: block; white-space: pre; }
+  .term .pr { color: var(--warm-2); user-select: none; }
+  .alt { margin: 4px 0 0; font-size: 14.5px; color: var(--muted); }
+  .alt a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
+  .alt a:hover { text-decoration-color: var(--warm-2); }
+
   /* ---------- Treemap ---------- */
   .map-frame {
     background: var(--bg-2);
@@ -138,15 +152,21 @@
     <div class="lede">
       <h1>Know exactly what's filling your Mac.</h1>
       <p class="sub">Disk Reclaim maps every byte on your disk and reclaims only what
-        you choose. Nothing leaves your Mac, and nothing is erased without a way back.</p>
-      <div class="actions">
-        <a class="cta" href="DiskReclaim.dmg" download>
-          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1v9m0 0 3.2-3.2M8 10 4.8 6.8M2 12v1.5A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V12" stroke="#10141c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Download for macOS
-        </a>
-        <a class="ghost" href="https://github.com/mohankolli9999/MacApps#quickstart--build--run-from-source">or build from source</a>
+        you choose. Nothing leaves your Mac, and nothing is erased without a way back.
+        Build it from source in three commands.</p>
+      <div class="term">
+        <div class="term-bar">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="term-title">build &amp; run</span>
+          <button class="copy" id="copyBtn" type="button">Copy</button>
+        </div>
+        <pre><code id="cmd"><span class="pr">$ </span>git clone https://github.com/mohankolli9999/MacApps.git
+<span class="pr">$ </span>cd MacApps &amp;&amp; scripts/bundle.sh release
+<span class="pr">$ </span>open .build/DiskReclaim.app</code></pre>
       </div>
-      <p class="meta"><b>Free</b> · macOS 14 (Sonoma) or later · Apple Silicon &amp; Intel · 2.3 MB</p>
+      <p class="alt">Not a developer? <a href="#download">Download the .dmg</a> — it opens
+        after a one-time approval.</p>
+      <p class="meta"><b>Free &amp; open source</b> · needs Xcode 16+ · macOS 14 (Sonoma) or later</p>
     </div>
 
     <div class="map-frame" aria-hidden="true">
@@ -269,17 +289,27 @@
     </div>
   </section>
 
-  <section id="install">
-    <p class="eyebrow">Opening it the first time</p>
-    <h2>One-time approval on first launch.</h2>
-    <div class="launch-note">This build isn't notarized by Apple yet, so macOS asks
-      you to confirm the first time you open it. It's a one-time step — after that,
-      it launches with a normal double-click.</div>
+  <section id="download">
+    <p class="eyebrow">Direct download</p>
+    <h2>Prefer the .dmg?</h2>
+    <p class="section-intro">Building from source is the smoothest path, because a
+      locally built app opens with no prompts. The download works too — it just
+      isn't notarized by Apple, so macOS asks you to approve it once.</p>
+    <div class="actions" style="margin-bottom:34px">
+      <a class="cta" href="DiskReclaim.dmg" download>
+        <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1v9m0 0 3.2-3.2M8 10 4.8 6.8M2 12v1.5A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V12" stroke="#10141c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download the .dmg
+      </a>
+      <span class="meta" style="margin:0">2.3 MB · macOS 14+</span>
+    </div>
+    <div class="launch-note">On first open you'll see "Apple could not verify…". That's
+      expected for an un-notarized app — it doesn't mean anything is wrong. Here's how
+      to open it anyway.</div>
     <ol class="steps">
       <li>Open the downloaded <code>.dmg</code> and drag <strong>Disk Reclaim</strong> into <strong>Applications</strong>.</li>
-      <li>Try to open it. macOS says it can't be checked for malware — expected for an app this new. Click <strong>Done</strong> (not Move to Trash).</li>
+      <li>Try to open it, then click <strong>Done</strong> on the dialog — <strong>not</strong> Move to Trash.</li>
       <li>Open <strong>System Settings → Privacy &amp; Security</strong>, scroll to Security, and click <strong>Open Anyway</strong> next to Disk Reclaim.</li>
-      <li>Confirm once more. Prefer the terminal? Run <code>xattr -dr com.apple.quarantine /Applications/DiskReclaim.app</code> and it opens straight away.</li>
+      <li>Confirm once more. Or, in the terminal, run <code>xattr -dr com.apple.quarantine /Applications/DiskReclaim.app</code> and it opens straight away.</li>
     </ol>
   </section>
 
@@ -289,5 +319,20 @@
   </footer>
 
 </div>
+<script>
+  (function () {
+    var btn = document.getElementById('copyBtn');
+    var cmd = document.getElementById('cmd');
+    if (!btn || !cmd || !navigator.clipboard) return;
+    btn.addEventListener('click', function () {
+      var text = cmd.innerText.replace(/^\$ /gm, '');
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+        setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1800);
+      });
+    });
+  })();
+</script>
 </body>
 </html>
